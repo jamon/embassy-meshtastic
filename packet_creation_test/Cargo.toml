@@ -1,0 +1,9 @@
+[package]
+name = "test-packet-creation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+femtopb = { version = "0.8.0" }
+meshtastic-protobufs = { path = "../meshtastic-protobufs", version = "0.1.0" }
+meshtastic-crypto = { path = "../meshtastic-crypto", version = "0.1.0", default-features = false }

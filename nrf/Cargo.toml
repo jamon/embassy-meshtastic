@@ -1,0 +1,65 @@
+[package]
+name = "embassy-nrf-lora"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "embassy-nrf-lora"
+path = "src/main.rs"
+test = false
+
+[dependencies]
+embassy-futures = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b" }
+embassy-sync = { version = "0.7.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt"] }
+embassy-executor = { version = "0.7.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
+embassy-time = { version = "0.4.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt", "defmt-timestamp-uptime"] }
+embassy-nrf = { version = "0.3.1", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt", "nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac", "time"] }
+embassy-net = { version = "0.7.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt", "tcp", "dhcpv4", "medium-ethernet"] }
+embassy-usb = { version = "0.4.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt"] }
+embedded-io = { version = "0.6.0", features = ["defmt-03"]  }
+embedded-io-async = { version = "0.6.1", features = ["defmt-03"] }
+embassy-net-esp-hosted = { version = "0.2.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt"] }
+embassy-net-enc28j60 = { version = "0.2.0", git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b", features = ["defmt"] }
+
+defmt = "1.0.1"
+defmt-rtt = "1.0.0"
+
+fixed = "1.10.0"
+static_cell = { version = "2" }
+cortex-m = { version = "0.7.6", features = ["inline-asm", "critical-section-single-core"] }
+cortex-m-rt = "0.7.0"
+panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+rand = { version = "0.9.0", default-features = false }
+embedded-storage = "0.3.1"
+usbd-hid = "0.8.1"
+serde = { version = "1.0.136", default-features = false }
+embedded-hal = { version = "1.0" }
+embedded-hal-async = { version = "1.0" }
+embedded-hal-bus = { version = "0.1", features = ["async"] }
+num-integer = { version = "0.1.45", default-features = false }
+microfft = "0.5.0"
+
+lora-phy = { git = "https://github.com/lora-rs/lora-rs.git", rev = "795dcc3add884ec389956c304c96308389779e1d", features = ["lorawan-radio", "defmt-03"] }
+lorawan-device = { git = "https://github.com/lora-rs/lora-rs.git", rev = "795dcc3add884ec389956c304c96308389779e1d", default-features = false, features = [
+    "embassy-time",
+    "defmt-03",
+    "region-us915"
+] }
+
+femtopb = { version = "0.8.0", features = ["defmt"] }
+aes = { version = "0.8", default-features = false }
+ctr = { version = "0.9", default-features = false }
+base64 = { version = "0.21", default-features = false }
+meshtastic-protobufs = { path = "../meshtastic-protobufs", version = "0.1.0", features = ["defmt"] }
+meshtastic-crypto = { path = "../meshtastic-crypto", version = "0.1.0", default-features = false, features = ["defmt"] }
+
+[patch.crates-io]
+embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b" }
+
+[build-dependencies]
+femtopb-build = { version = "0.8"}
+anyhow = { version = "1.0"}
+walkdir = { version = "2.5"}
+
+[profile.release]
+debug = 2

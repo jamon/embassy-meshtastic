@@ -1,0 +1,5 @@
+/target
+/meshtastic-crypto/target
+/meshtastic-protobufs/target
+/nrf/target
+/packet_creation_test/target

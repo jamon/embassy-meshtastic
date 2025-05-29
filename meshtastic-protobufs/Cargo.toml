@@ -1,0 +1,17 @@
+[package]
+name = "meshtastic-protobufs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+femtopb = { version = "0.8.0", features = [], default-features = false }
+defmt = "1.0.1"
+
+[features]
+default = []
+defmt = ["femtopb/defmt"]
+
+[build-dependencies]
+femtopb-build = { version = "0.8"}
+anyhow = { version = "1.0"}
+walkdir = { version = "2.5"}

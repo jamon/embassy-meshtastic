@@ -1,0 +1,15 @@
+{
+    "rust-analyzer.checkOnSave.enable": true,
+    "rust-analyzer.check.command": "check",
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.diagnostics.disabled": [
+        "missing-tests"
+    ],
+    "rust-analyzer.cargo.buildScripts.enable": true,
+    "rust-analyzer.lens.enable": false,
+    "rust-analyzer.inlayHints.enable": false,
+    "rust-analyzer.procMacro.enable": true,
+    "rust-analyzer.cargo.extraEnv": {
+        "DEFMT_LOG": "debug"
+    }
+}
