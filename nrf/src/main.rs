@@ -22,6 +22,26 @@ use meshtastic_protobufs::meshtastic::{
     Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User,
 };
 
+#[derive(defmt::Format)]
+enum DecodedPacket<'a> {
+    Telemetry(Telemetry<'a>),
+    NodeInfo(User<'a>),
+    Position(Position<'a>),
+    NeighborInfo(NeighborInfo<'a>),
+    TextMessage(&'a str),
+    Routing(Routing<'a>),
+    RouteDiscovery(RouteDiscovery<'a>),
+    Unknown(femtopb::EnumValue<PortNum>),
+    Other(femtopb::EnumValue<PortNum>),
+    TelemetryDecodeError,
+    NodeInfoDecodeError,
+    PositionDecodeError,
+    NeighborInfoDecodeError,
+    TextMessageDecodeError,
+    RoutingDecodeError,
+    RouteDiscoveryDecodeError,
+}
+
 // Meshtastic LoRa parameters
 const LORA_PREAMBLE_LENGTH: u16 = 16;
 const LORA_SYNCWORD: u8 = 0x2B;
@@ -152,81 +172,45 @@ async fn main(_spawner: Spawner) {
 
     info!("TX Header: {}", tx_header);
 
-    // Create the data payload
-    let data = Data {
-        portnum: femtopb::EnumValue::Known(PortNum::TextMessageApp),
-        payload:
-            b"woohoo, first successful meshtastic packet from a fully-rust meshtastic firmware!",
-        want_response: false,
-        dest: 0,
-        source: 0,
-        request_id: 0,
-        reply_id: 0,
-        emoji: 0,
-        bitfield: Some(0),
-        unknown_fields: Default::default(),
-    };
-
-    // Encode the data payload to protobuf
-    let mut payload_buffer = [0u8; 240]; // Leave room for header (256 - 16)
-    let buffer_len = payload_buffer.len();
-    let mut slice = payload_buffer.as_mut_slice();
-    data.encode(&mut slice).unwrap();
-    let encoded_payload_len = buffer_len - slice.len();
-
-    info!("Encoded payload length: {} bytes", encoded_payload_len);
-    info!(
-        "Encoded payload: {:02X}",
-        &payload_buffer[..encoded_payload_len]
-    );
-
-    // Encrypt the packet
+    // Create and send a test message
     let mut tx_buffer = [0u8; 256];
-    let key = [0x01u8]; // Simple 1-byte key for testing
-    let key_len = 1;
+    if let Some(packet_len) =
+        create_text_message_packet(&tx_header, "Hello, world!", &[0x01u8], 1, &mut tx_buffer)
+    {
+        info!("Created message packet with length: {}", packet_len);
 
-    let encrypted_packet_len = encrypt_meshtastic_packet(
-        &tx_header,
-        &payload_buffer[..encoded_payload_len],
-        &mut tx_buffer,
-        &key,
-        key_len,
-    );
-    info!(
-        "Encrypted Packet (len: {}): {:02X}",
-        encrypted_packet_len.unwrap_or(0),
-        &tx_buffer[..encrypted_packet_len.unwrap_or(0)]
-    );
-    let tx_packet_len = encrypted_packet_len.unwrap_or(0);
+        // Test our packet decoding by processing it through handle_received_packet
+        info!("Testing packet decoding with our created packet:");
+        handle_received_packet(
+            &tx_buffer,
+            packet_len,
+            &mut decrypted_buffer,
+            &tx_header,
+            -50, // Mock RSSI value
+            10,  // Mock SNR value
+        );
 
-    // match encrypted_packet_len {
-    //     Some(packet_len) => {
-    //         info!("Successfully encrypted packet! Length: {} bytes", packet_len);
-    //         info!("Encrypted packet: {:02X}", &tx_buffer[..packet_len]);            // Now transmit the packet
-    //         match lora
-    //             .prepare_for_tx(&mdltn_params, &mut tx_pkt_params, packet_len as i32, &tx_buffer[..packet_len])
-    //             .await
-    //         {
-    //             Ok(()) => {
-    //                 info!("Radio prepared for TX");
-    //                 match lora.tx().await {
-    //                     Ok(()) => {
-    //                         info!("TX DONE - Packet transmitted successfully!");
-    //                     }
-    //                     Err(err) => {
-    //                         info!("Radio TX error = {}", err);
-    //                     }
-    //                 }
-    //             }
-    //             Err(err) => {
-    //                 info!("Radio prepare_for_tx error = {}", err);
-    //             }
-    //         };
-    //     }
-    //     None => {
-    //         info!("Failed to encrypt packet");
-    //     }
-    // }
+        // match lora
+        //     .prepare_for_tx(
+        //         &mdltn_params,
+        //         &mut tx_pkt_params,
+        //         packet_len as i32,
+        //         &tx_buffer[..packet_len],
+        //     )
+        //     .await
+        // {
+        //     Ok(()) => {
+        //         info!("Radio prepared for TX");
+        //         match lora.tx().await {
+        //             Ok(()) => info!("TX DONE - Packet transmitted successfully!"),
+        //             Err(err) => info!("Radio TX error: {}", err),
+        //         }
+        //     }
+        //     Err(err) => info!("Radio prepare_for_tx error: {}", err),
+        // }
+    } else {
+        info!("Failed to create message packet");
+    }
 
     // RX
     match lora
@@ -252,199 +236,176 @@ async fn main(_spawner: Spawner) {
 
                 // decode header
                 let header = MeshtasticHeader::from_bytes(&receiving_buffer[..16]).unwrap();
-                match decrypt_meshtastic_packet(
-                    &receiving_buffer[..received_len],
+
+                handle_received_packet(
+                    &receiving_buffer,
                     received_len,
                     &mut decrypted_buffer,
-                    &[0x01; 1],
-                    1, // Use 16-byte key length for AES-128
-                ) {
-                    Some(payload_len) => {
-                        trace!("Header: {:02X}", &receiving_buffer[..16]);
-                        trace!(
-                            "Decrypted payload: {:02X}",
-                            &decrypted_buffer[..payload_len]
-                        );
-                        // Try to decode the protobuf message
-                        match Data::decode(&decrypted_buffer[..payload_len]) {
-                            Ok(mp) => {
-                                trace!("Decoded packet {:?} ", mp);
-                                let portnum = mp.portnum;
-                                match portnum {
-                                    femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
-                                        match Telemetry::decode(&mp.payload) {
-                                            Ok(telemetry) => {
-                                                info!(
-                                                    "\n{} - {}\n    Telemetry data: {:?}",
-                                                    header, rx_pkt_status, telemetry
-                                                );
-                                            }
-                                            Err(err) => {
-                                                info!(
-                                                    "Failed to decode Telemetry protobuf: {:?}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
-                                        match User::decode(&mp.payload) {
-                                            Ok(user_info) => {
-                                                info!(
-                                                    "\n{} - {}\n    User Info: {:?}",
-                                                    header, rx_pkt_status, user_info
-                                                );
-                                            }
-                                            Err(err) => {
-                                                info!(
-                                                    "Failed to decode NodeInfo protobuf: {:?}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Known(PortNum::PositionApp) => {
-                                        match Position::decode(&mp.payload) {
-                                            Ok(position) => {
-                                                info!(
-                                                    "\n{} - {}\n    Position data: {:?}",
-                                                    header, rx_pkt_status, position
-                                                );
-                                            }
-                                            Err(err) => {
-                                                info!(
-                                                    "Failed to decode Position protobuf: {:?}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => {
-                                        match NeighborInfo::decode(&mp.payload) {
-                                            Ok(neighbor_info) => {
-                                                info!(
-                                                    "\n{} - {}\n    Neighbor Info: {:?}",
-                                                    header, rx_pkt_status, neighbor_info
-                                                );
-                                            }
-                                            Err(err) => {
-                                                info!(
-                                                    "Failed to decode NeighborInfo protobuf: {:?}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Known(PortNum::TextMessageApp) => {
-                                        match core::str::from_utf8(&mp.payload) {
-                                            Ok(text_message) => {
-                                                info!(
-                                                    "\n{} - {}\n    Text Message: {}",
-                                                    header, rx_pkt_status, text_message
-                                                );
-                                            }
-                                            Err(_) => {
-                                                info!("Failed to decode TextMessage as UTF-8");
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Known(PortNum::RoutingApp) => {
-                                        match Routing::decode(&mp.payload) {
-                                            Ok(routing) => {
-                                                info!(
-                                                    "\n{} - {}\n    Routing data: {:?}",
-                                                    header, rx_pkt_status, routing
-                                                );
-                                            }
-                                            Err(err) => {
-                                                info!(
-                                                    "Failed to decode Routing protobuf: {:?}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Known(PortNum::TracerouteApp) => {
-                                        match RouteDiscovery::decode(&mp.payload) {
-                                            Ok(route_discovery) => {
-                                                info!(
-                                                    "\n{} - {}\n    Route Discovery: {:?}",
-                                                    header, rx_pkt_status, route_discovery
-                                                );
-                                                for (route_toward, snr_toward) in route_discovery
-                                                    .route
-                                                    .iter()
-                                                    .zip(route_discovery.snr_towards.iter())
-                                                {
-                                                    match route_toward {
-                                                        Ok(node_num) => {
-                                                            info!(
-                                                                "        Toward: {:02X}, SNR: {:?}",
-                                                                node_num, snr_toward
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            info!(
-                                                                "        Toward: Error decoding node number: {:?}, SNR: {:?}",
-                                                                err, snr_toward
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                                for (route_back, snr_back) in route_discovery
-                                                    .route_back
-                                                    .iter()
-                                                    .zip(route_discovery.snr_back.iter())
-                                                {
-                                                    match route_back {
-                                                        Ok(node_num) => {
-                                                            info!(
-                                                                "        Back: {:02X}, SNR: {:?}",
-                                                                node_num, snr_back
-                                                            );
-                                                        }
-                                                        Err(err) => {
-                                                            info!(
-                                                                "        Back: Error decoding node number: {:?}, SNR: {:?}",
-                                                                err, snr_back
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            Err(err) => {
-                                                info!(
-                                                    "Failed to decode RouteDiscovery protobuf: {:?}",
-                                                    err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    femtopb::EnumValue::Unknown(_) => {
-                                        info!(
-                                            "\n{} - {}\n    Unknown port number: {:?}",
-                                            header, rx_pkt_status, portnum
-                                        );
-                                    }
-                                    _ => {
-                                        info!(
-                                            "\n{} - {}\n    Received data on port: {:?}",
-                                            header, rx_pkt_status, portnum
-                                        );
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                info!("Failed to decode protobuf: {:?}", err);
-                            }
-                        }
-                    }
-                    None => {
-                        info!("Failed to decrypt packet");
-                    }
-                }
+                    &header,
+                    rx_pkt_status.rssi,
+                    rx_pkt_status.snr,
+                );
             }
             Err(err) => info!("rx unsuccessful = {}", err),
+        }
+    }
+}
+
+fn handle_received_packet(
+    receiving_buffer: &[u8],
+    received_len: usize,
+    decrypted_buffer: &mut [u8],
+    header: &MeshtasticHeader,
+    rssi: i16,
+    snr: i16,
+) {
+    match decrypt_meshtastic_packet(
+        &receiving_buffer[..received_len],
+        received_len,
+        decrypted_buffer,
+        &[0x01; 1],
+        1, // Use 16-byte key length for AES-128
+    ) {
+        Some(payload_len) => {
+            trace!("Header: {:02X}", &receiving_buffer[..16]);
+            trace!(
+                "Decrypted payload: {:02X}",
+                &decrypted_buffer[..payload_len]
+            );
+            // Try to decode the protobuf message
+            match Data::decode(&decrypted_buffer[..payload_len]) {
+                Ok(mp) => {
+                    trace!("Decoded packet {:?} ", mp);
+                    let portnum = mp.portnum;
+
+                    // Decode into our enum
+                    let decoded_packet = match portnum {
+                        femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
+                            match Telemetry::decode(&mp.payload) {
+                                Ok(telemetry) => DecodedPacket::Telemetry(telemetry),
+                                Err(_) => DecodedPacket::TelemetryDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
+                            match User::decode(&mp.payload) {
+                                Ok(user_info) => DecodedPacket::NodeInfo(user_info),
+                                Err(_) => DecodedPacket::NodeInfoDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::PositionApp) => {
+                            match Position::decode(&mp.payload) {
+                                Ok(position) => DecodedPacket::Position(position),
+                                Err(_) => DecodedPacket::PositionDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => {
+                            match NeighborInfo::decode(&mp.payload) {
+                                Ok(neighbor_info) => DecodedPacket::NeighborInfo(neighbor_info),
+                                Err(_) => DecodedPacket::NeighborInfoDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::TextMessageApp) => {
+                            match core::str::from_utf8(&mp.payload) {
+                                Ok(text_message) => DecodedPacket::TextMessage(text_message),
+                                Err(_) => DecodedPacket::TextMessageDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::RoutingApp) => {
+                            match Routing::decode(&mp.payload) {
+                                Ok(routing) => DecodedPacket::Routing(routing),
+                                Err(_) => DecodedPacket::RoutingDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::TracerouteApp) => {
+                            match RouteDiscovery::decode(&mp.payload) {
+                                Ok(route_discovery) => {
+                                    DecodedPacket::RouteDiscovery(route_discovery)
+                                }
+                                Err(_) => DecodedPacket::RouteDiscoveryDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Unknown(_) => DecodedPacket::Unknown(portnum),
+                        _ => DecodedPacket::Other(portnum),
+                    };
+
+                    // Single log statement for all packet types
+                    info!(
+                        "\n{} - RSSI: {}, SNR: {}\n    {:?}",
+                        header, rssi, snr, decoded_packet
+                    );
+                }
+                Err(err) => {
+                    info!("Failed to decode protobuf: {:?}", err);
+                }
+            }
+        }
+        None => {
+            info!("Failed to decrypt packet");
+        }
+    }
+}
+
+// temporary function just to test sending text messages
+// This will be replaced with a proper Meshtastic API call in the future
+fn create_text_message_packet(
+    header: &MeshtasticHeader,
+    message: &str,
+    key: &[u8],
+    key_len: usize,
+    tx_buffer: &mut [u8; 256],
+) -> Option<usize> {
+    // Create the data payload
+    let data = Data {
+        portnum: femtopb::EnumValue::Known(PortNum::TextMessageApp),
+        payload: message.as_bytes(),
+        want_response: false,
+        dest: 0,
+        source: 0,
+        request_id: 0,
+        reply_id: 0,
+        emoji: 0,
+        bitfield: Some(0),
+        unknown_fields: Default::default(),
+    };
+
+    // Encode the data payload to protobuf
+    let mut payload_buffer = [0u8; 240]; // Leave room for header (256 - 16)
+    let buffer_len = payload_buffer.len();
+    let mut slice = payload_buffer.as_mut_slice();
+
+    if let Err(_) = data.encode(&mut slice) {
+        info!("Failed to encode data");
+        return None;
+    }
+
+    let encoded_payload_len = buffer_len - slice.len();
+    info!("Encoded payload length: {} bytes", encoded_payload_len);
+    info!(
+        "Encoded payload: {:02X}",
+        &payload_buffer[..encoded_payload_len]
+    );
+
+    // Encrypt the packet
+    let encrypted_packet_len = encrypt_meshtastic_packet(
+        header,
+        &payload_buffer[..encoded_payload_len],
+        tx_buffer,
+        key,
+        key_len,
+    );
+
+    match encrypted_packet_len {
+        Some(packet_len) => {
+            info!(
+                "Successfully encrypted packet! Length: {} bytes",
+                packet_len
+            );
+            info!("Encrypted packet: {:02X}", &tx_buffer[..packet_len]);
+            Some(packet_len)
+        }
+        None => {
+            info!("Failed to encrypt packet");
+            None
         }
     }
 }
