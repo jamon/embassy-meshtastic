@@ -6,10 +6,11 @@ use core::u32;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
-use embassy_nrf::{bind_interrupts, peripherals, rng, spim};
+use embassy_nrf::{bind_interrupts, pac, peripherals, rng, spim, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
 use embassy_time::Delay;
+use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use femtopb::Message as _;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
@@ -18,6 +19,12 @@ use lora_phy::{mod_params::*, sx126x};
 use lora_phy::{LoRa, RxMode};
 use meshtastic_crypto::header::MeshtasticHeaderFlags;
 use {defmt_rtt as _, panic_probe as _};
+
+use embassy_nrf::usb::vbus_detect::{HardwareVbusDetect, VbusDetect};
+use embassy_nrf::usb::{Driver, Instance};
+use embassy_usb::{Builder, Config};
+use embassy_usb::driver::EndpointError;
+use embassy_futures::join::join;
 
 use meshtastic_crypto::{decrypt_meshtastic_packet, encrypt_meshtastic_packet, MeshtasticHeader};
 use meshtastic_protobufs::meshtastic::{
@@ -75,6 +82,8 @@ const LORA_CODINGRATE: CodingRate = CodingRate::_4_5;
 bind_interrupts!(struct Irqs {
     TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
     RNG => rng::InterruptHandler<peripherals::RNG>;
+    USBD => usb::InterruptHandler<peripherals::USBD>;
+    CLOCK_POWER => usb::vbus_detect::InterruptHandler;
 });
 
 
@@ -139,6 +148,54 @@ async fn packet_processor_task() {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
+
+    // USB
+    info!("Enabling ext hfosc...");
+    pac::CLOCK.tasks_hfclkstart().write_value(1);
+    while pac::CLOCK.events_hfclkstarted().read() != 1 {}
+    info!("Ext hfosc enabled");
+
+    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+
+    let mut config = Config::new(0xc0de, 0xcafe);
+    config.manufacturer = Some("Embassy");
+    config.product = Some("USB-serial example");
+    config.serial_number = Some("12345678");
+    config.max_power = 100;
+    config.max_packet_size_0 = 64;
+
+    let mut config_descriptor = [0; 256];
+    let mut bos_descriptor = [0; 256];
+    let mut msos_descriptor = [0; 256];
+    let mut control_buf = [0; 64];
+
+    let mut state = State::new();
+
+    let mut builder = Builder::new(
+        driver,
+        config,
+        &mut config_descriptor,
+        &mut bos_descriptor,
+        &mut msos_descriptor,
+        &mut control_buf,
+    );
+    
+    let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
+    let mut usb = builder.build();
+    let usb_fut = usb.run();
+
+    let echo_fut = async {
+        info!("Waiting for USB connection...");
+        loop {
+            class.wait_connection().await;
+            info!("Connected");
+            let _ = echo(&mut class).await;
+            info!("Disconnected");
+        }
+    };
+    join(usb_fut, echo_fut).await;
+
+
 
     let nss = Output::new(p.P0_04, Level::High, OutputDrive::Standard);
     let reset = Output::new(p.P0_28, Level::High, OutputDrive::Standard);
@@ -496,5 +553,33 @@ fn create_text_message_packet(
             info!("Failed to encrypt packet");
             None
         }
+    }
+}
+
+
+
+struct Disconnected {}
+
+impl From<EndpointError> for Disconnected {
+    fn from(val: EndpointError) -> Self {
+        match val {
+            EndpointError::BufferOverflow => {
+                info!("Buffer overflow");
+                Disconnected {}
+            },
+            EndpointError::Disabled => Disconnected {},
+        }
+    }
+}
+
+async fn echo<'d, T: Instance + 'd, P: VbusDetect + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
+) -> Result<(), Disconnected> {
+    let mut buf = [0; 64];
+    loop {
+        let n = class.read_packet(&mut buf).await?;
+        let data = &buf[..n];
+        info!("data: {:x}", data);
+        class.write_packet(data).await?;
     }
 }
