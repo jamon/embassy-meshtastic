@@ -7,6 +7,8 @@ use defmt::*;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
 use embassy_nrf::{bind_interrupts, peripherals, rng, spim};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
 use embassy_time::Delay;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use femtopb::Message as _;
@@ -22,7 +24,23 @@ use meshtastic_protobufs::meshtastic::{
     Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User,
 };
 
-#[derive(defmt::Format)]
+static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet, 8, 8, 1> = PubSubChannel::<CriticalSectionRawMutex, Packet, 8, 8, 1>::new();
+#[derive(defmt::Format, Clone)]
+pub struct Packet {
+    pub header: MeshtasticHeader,
+    pub port_num: femtopb::EnumValue<PortNum>,
+    pub rssi: i16,
+    pub snr: i16,
+    pub payload: [u8; 240],
+    pub payload_len: usize,
+}
+// #[derive(defmt::Format, Clone)]
+// struct DecodedPacketWithHeader<'a> {
+//     header: MeshtasticHeader,
+//     packet: DecodedPacket<'a>,
+// }
+
+#[derive(defmt::Format, Clone)]
 enum DecodedPacket<'a> {
     Telemetry(Telemetry<'a>),
     NodeInfo(User<'a>),
@@ -59,8 +77,67 @@ bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<peripherals::RNG>;
 });
 
+
+// This example task processes incoming packets from the Meshtastic radio.
+// It subscribes to the PACKET_CHANNEL and handles each packet as it arrives.
+#[embassy_executor::task]
+async fn packet_processor_task() {
+    info!("Starting packet processor task");
+    let mut subscriber = PACKET_CHANNEL.subscriber().unwrap();
+      loop {
+        let wait_result = subscriber.next_message().await;
+        let packet = match wait_result {
+            embassy_sync::pubsub::WaitResult::Message(msg) => msg,
+            embassy_sync::pubsub::WaitResult::Lagged(_) => {
+                info!("Packet processor lagged, continuing...");
+                continue;
+            }
+        };
+        
+        // Process the received packet
+        info!("Packet processor received packet:");
+        info!("  Port: {:?}", packet.port_num);
+        info!("  RSSI: {}, SNR: {}", packet.rssi, packet.snr);
+        info!("  Source: 0x{:08X}, Dest: 0x{:08X}", 
+              packet.header.source, packet.header.destination);
+
+        // Decode the specific payload based on port type
+        match packet.port_num {
+            femtopb::EnumValue::Known(PortNum::TextMessageApp) => {
+                if let Ok(text) = core::str::from_utf8(&packet.payload[..packet.payload_len]) {
+                    info!("  Text Message: \"{}\"", text);
+                } else {
+                    info!("  Text Message (invalid UTF-8): {:02X}", &packet.payload[..packet.payload_len]);
+                }
+            },
+            femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
+                match Telemetry::decode(&packet.payload[..packet.payload_len]) {
+                    Ok(telemetry) => info!("  Telemetry: {:?}", telemetry),
+                    Err(_) => info!("  Telemetry (decode error)"),
+                }
+            },
+            femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
+                match User::decode(&packet.payload[..packet.payload_len]) {
+                    Ok(user) => info!("  User Info: {:?}", user),
+                    Err(_) => info!("  User Info (decode error)"),
+                }
+            },
+            femtopb::EnumValue::Known(PortNum::PositionApp) => {
+                match Position::decode(&packet.payload[..packet.payload_len]) {
+                    Ok(position) => info!("  Position: {:?}", position),
+                    Err(_) => info!("  Position (decode error)"),
+                }
+            },
+            _ => {
+                info!("  Unknown/Other port type: {:?}", packet.port_num);
+                info!("  Raw payload: {:02X}", &packet.payload[..packet.payload_len]);
+            }
+        }
+    }
+}
+
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
 
     let nss = Output::new(p.P0_04, Level::High, OutputDrive::Standard);
@@ -95,11 +172,12 @@ async fn main(_spawner: Spawner) {
 
     let mut led_red = Output::new(p.P0_26, Level::Low, OutputDrive::Standard);
     let mut led_green = Output::new(p.P0_30, Level::Low, OutputDrive::Standard);
-    let mut led_blue = Output::new(p.P0_06, Level::Low, OutputDrive::Standard);
-
-    led_green.set_high();
+    let mut led_blue = Output::new(p.P0_06, Level::Low, OutputDrive::Standard);    led_green.set_high();
     led_blue.set_high();
     led_red.set_high();
+
+    // Spawn the packet processor task
+    spawner.spawn(packet_processor_task()).unwrap();
 
     info!(
         "Starting Meshtastic Radio on frequency {} Hz with syncword 0x{:02X}",
@@ -277,6 +355,17 @@ fn handle_received_packet(
                 Ok(mp) => {
                     trace!("Decoded packet {:?} ", mp);
                     let portnum = mp.portnum;
+                    // publish the packet to the channel - probably need to handle when decryption fails better
+                    let mut packet = Packet {
+                        header: header.clone(),
+                        port_num: portnum,
+                        rssi,
+                        snr,
+                        payload: [0; 240],
+                        payload_len: mp.payload.len(),
+                    };
+                    packet.payload[..mp.payload.len()].copy_from_slice(&mp.payload);
+                    PACKET_CHANNEL.publish_immediate(packet);
 
                     // Decode into our enum
                     let decoded_packet = match portnum {

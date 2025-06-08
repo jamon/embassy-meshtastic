@@ -41,6 +41,9 @@ The modular design of embassy-rs makes it relatively easy to port to other board
 - [ ] Bluetooth support
 - [ ] WiFi support
 - [ ] Support configuration (preferably without reboots, preferably support Meshtastic client managed config)
+- [ ] Support multiple concurrent client connections
+- [ ] Support public connection mode (only access public channels/read-only)
+- [ ] Built-in Web Client
 
 ## Project Structure
 
