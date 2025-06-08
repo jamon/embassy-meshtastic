@@ -50,6 +50,7 @@ femtopb = { version = "0.8.0", features = ["defmt"] }
 aes = { version = "0.8", default-features = false }
 ctr = { version = "0.9", default-features = false }
 base64 = { version = "0.21", default-features = false }
+heapless = { version = "0.8", default-features = false }
 meshtastic-protobufs = { path = "../meshtastic-protobufs", version = "0.1.0", features = ["defmt"] }
 meshtastic-crypto = { path = "../meshtastic-crypto", version = "0.1.0", default-features = false, features = ["defmt"] }
 

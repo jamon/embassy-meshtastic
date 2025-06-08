@@ -21,6 +21,7 @@ The modular design of embassy-rs makes it relatively easy to port to other board
 - [x] Decode most packets on primary channel
 - [x] Send packets on primary channel
 - [x] AES encryption/decryption for Meshtastic packets
+- [x] USB Serial implementation
 - [x] Protobuf message parsing for various Meshtastic message types:
   - Text messages
   - Telemetry data

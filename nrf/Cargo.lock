@@ -528,6 +528,7 @@ dependencies = [
  "femtopb",
  "femtopb-build",
  "fixed",
+ "heapless",
  "lora-phy",
  "lorawan-device",
  "meshtastic-crypto",
