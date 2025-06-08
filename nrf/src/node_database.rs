@@ -311,6 +311,21 @@ impl NodeDatabase {
         }
         None
     }
+    
+    /// Get user info for a specific node by its number
+    pub fn get_node_user(&self, node_num: u32) -> Option<&User> {
+        self.get_node(node_num)?.user.as_ref()
+    }
+    
+    /// Get the short name for a specific node, or return a default if not available
+    pub fn get_node_short_name(&self, node_num: u32) -> &str {
+        if let Some(user) = self.get_node_user(node_num) {
+            if !user.short_name.is_empty() {
+                return user.short_name.as_str();
+            }
+        }
+        "UNK" // Unknown/default short name
+    }
       /// Get all active nodes
     pub fn get_active_nodes(&self) -> impl Iterator<Item = &NodeInfo> {
         self.nodes.iter().filter_map(|n| n.as_ref())

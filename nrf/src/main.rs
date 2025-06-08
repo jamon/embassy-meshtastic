@@ -116,14 +116,21 @@ async fn packet_processor_task() {
                 info!("Packet processor lagged, continuing...");
                 continue;
             }
+        };        // Process the received packet
+
+        let database_guard = NODE_DATABASE.lock().await;
+        let source_short_name = if let Some(ref db) = *database_guard {
+            db.get_node_short_name(packet.header.source)
+        } else {
+            "UNK"
         };
-        
-        // Process the received packet
+
+
         info!("Packet processor received packet:");
         info!("  Port: {:?}", packet.port_num);
         info!("  RSSI: {}, SNR: {}", packet.rssi, packet.snr);
-        info!("  Source: 0x{:08X}, Dest: 0x{:08X}", 
-              packet.header.source, packet.header.destination);
+        info!("  Source: 0x{:08X} ({}), Dest: 0x{:08X}", 
+                packet.header.source, source_short_name, packet.header.destination);
 
         // Decode the specific payload based on port type
         match packet.port_num {
@@ -485,13 +492,24 @@ fn handle_received_packet(
                         }
                         femtopb::EnumValue::Unknown(_) => DecodedPacket::Unknown(portnum),
                         _ => DecodedPacket::Other(portnum),
-                    };
-
-                    // Single log statement for all packet types
-                    info!(
-                        "\n{} - RSSI: {}, SNR: {}\n    {:?}",
-                        header, rssi, snr, decoded_packet
-                    );
+                    };                    // Single log statement for all packet types with short name lookup
+                    if let Ok(database_guard) = NODE_DATABASE.try_lock() {
+                        let source_short_name = if let Some(ref db) = *database_guard {
+                            db.get_node_short_name(header.source)
+                        } else {
+                            "UNK"
+                        };
+                        info!(
+                            "\n{} ({}) - RSSI: {}, SNR: {}\n    {:?}",
+                            header, source_short_name, rssi, snr, decoded_packet
+                        );
+                    } else {
+                        // Database is locked, fall back to original logging
+                        info!(
+                            "\n{} - RSSI: {}, SNR: {}\n    {:?}",
+                            header, rssi, snr, decoded_packet
+                        );
+                    }
                 }
                 Err(err) => {
                     info!("Failed to decode protobuf: {:?}", err);
