@@ -718,7 +718,6 @@ async fn usb_serial_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static
     join(usb_fut, packet_forwarder_fut).await;
 }
 
-// Example functions showing how to safely access the mutable static variables
 async fn initialize_node_database() {
     // Initialize the node database
     let mut database_guard = NODE_DATABASE.lock().await;
@@ -796,15 +795,5 @@ async fn add_or_update_node(packet: &Packet) -> bool {
     } else {
         info!("Node database not initialized");
         false
-    }
-}
-
-async fn get_node_count() -> usize {
-    let db_guard = NODE_DATABASE.lock().await;
-    
-    if let Some(ref db) = *db_guard {
-        db.get_active_nodes().count()
-    } else {
-        0
     }
 }
