@@ -2,11 +2,17 @@
 
 use base64::engine::general_purpose;
 use base64::Engine;
-use key::{MeshKey, MeshKeyTrait};
 use core::prelude::v1::*;
+use key::{MeshKey, MeshKeyTrait};
 
 #[cfg(feature = "defmt")]
 use defmt::Format;
+
+// Re-export commonly used types
+pub use meshtastic_protobufs::meshtastic::PortNum;
+pub use meshtastic_protobufs::meshtastic::{
+    NeighborInfo, Position, RouteDiscovery, Routing, Telemetry, User,
+};
 
 // Channel hash generation utilities
 pub mod channel;
@@ -17,6 +23,43 @@ pub use header::MeshtasticHeader;
 
 // Meshtastic key management utilities
 pub mod key;
+
+// Node database for storing device information
+pub mod node_database;
+
+/// Represents a received or transmitted Meshtastic packet
+#[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub struct Packet {
+    pub header: MeshtasticHeader,
+    pub port_num: femtopb::EnumValue<PortNum>,
+    pub rssi: i16,
+    pub snr: i16,
+    pub payload: [u8; 240],
+    pub payload_len: usize,
+}
+
+/// Represents a decoded Meshtastic packet with its specific payload type
+#[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub enum DecodedPacket<'a> {
+    Telemetry(Telemetry<'a>),
+    NodeInfo(User<'a>),
+    Position(Position<'a>),
+    NeighborInfo(NeighborInfo<'a>),
+    TextMessage(&'a str),
+    Routing(Routing<'a>),
+    RouteDiscovery(RouteDiscovery<'a>),
+    Unknown(femtopb::EnumValue<PortNum>),
+    Other(femtopb::EnumValue<PortNum>),
+    TelemetryDecodeError,
+    NodeInfoDecodeError,
+    PositionDecodeError,
+    NeighborInfoDecodeError,
+    TextMessageDecodeError,
+    RoutingDecodeError,
+    RouteDiscoveryDecodeError,
+}
 
 /// Errors that can occur during cryptographic operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +97,7 @@ pub fn parse_key(base64_key: &str) -> Result<[u8; 32], CryptoError> {
 
 /// Decrypt a Meshtastic packet
 /// Returns the length of the decrypted payload on success, or None if the packet is invalid
-/// 
+///
 /// Supports different key sizes:
 /// - 1 byte: Uses default key with LSB replaced by the provided byte (AES-128)
 /// - 16 bytes: Uses AES-128 with the provided key
@@ -75,12 +118,12 @@ pub fn decrypt_meshtastic_packet(
     if payload_len == 0 || payload_len > output_buffer.len() {
         return None;
     }
-    
+
     // Validate key buffer has enough bytes for specified length
     if key.len() < key_len {
         return None;
     }
-    
+
     // Split into header and encrypted payload
     let (header_bytes, encrypted_payload) = packet_buffer.split_at(16);
 
@@ -104,7 +147,7 @@ pub fn decrypt_meshtastic_packet(
                 Ok(_) => Some(payload_len),
                 Err(_) => None,
             }
-        },
+        }
         Err(_) => return None,
     }
 }
@@ -135,7 +178,7 @@ pub fn encrypt_meshtastic_packet(
     if output_buffer.len() < packet_len || payload.is_empty() {
         return None;
     }
-    
+
     // Validate key buffer has enough bytes for specified length
     if key.len() < key_len {
         return None;
@@ -159,8 +202,7 @@ pub fn encrypt_meshtastic_packet(
                 Ok(_) => Some(packet_len),
                 Err(_) => None,
             }
-        },
+        }
         Err(_) => return None,
     }
 }
-

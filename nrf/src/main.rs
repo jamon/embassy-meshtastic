@@ -28,18 +28,20 @@ use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 
 use meshtassy_net::header::MeshtasticHeaderFlags;
-use meshtassy_net::{decrypt_meshtastic_packet, encrypt_meshtastic_packet, MeshtasticHeader};
+use meshtassy_net::{
+    decrypt_meshtastic_packet, encrypt_meshtastic_packet, DecodedPacket, MeshtasticHeader, Packet,
+};
 use meshtastic_protobufs::meshtastic::{
     Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User,
 };
 
-mod node_database;
-
 static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet, 8, 8, 1> =
     PubSubChannel::<CriticalSectionRawMutex, Packet, 8, 8, 1>::new();
 
-static NODE_DATABASE: Mutex<CriticalSectionRawMutex, Option<node_database::NodeDatabase>> =
-    Mutex::new(None);
+static NODE_DATABASE: Mutex<
+    CriticalSectionRawMutex,
+    Option<meshtassy_net::node_database::NodeDatabase>,
+> = Mutex::new(None);
 
 // USB static allocations for Embassy's Forever pattern
 static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
@@ -47,40 +49,6 @@ static BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static MSOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
 static STATE: StaticCell<State> = StaticCell::new();
-#[derive(defmt::Format, Clone)]
-pub struct Packet {
-    pub header: MeshtasticHeader,
-    pub port_num: femtopb::EnumValue<PortNum>,
-    pub rssi: i16,
-    pub snr: i16,
-    pub payload: [u8; 240],
-    pub payload_len: usize,
-}
-// #[derive(defmt::Format, Clone)]
-// struct DecodedPacketWithHeader<'a> {
-//     header: MeshtasticHeader,
-//     packet: DecodedPacket<'a>,
-// }
-
-#[derive(defmt::Format, Clone)]
-enum DecodedPacket<'a> {
-    Telemetry(Telemetry<'a>),
-    NodeInfo(User<'a>),
-    Position(Position<'a>),
-    NeighborInfo(NeighborInfo<'a>),
-    TextMessage(&'a str),
-    Routing(Routing<'a>),
-    RouteDiscovery(RouteDiscovery<'a>),
-    Unknown(femtopb::EnumValue<PortNum>),
-    Other(femtopb::EnumValue<PortNum>),
-    TelemetryDecodeError,
-    NodeInfoDecodeError,
-    PositionDecodeError,
-    NeighborInfoDecodeError,
-    TextMessageDecodeError,
-    RoutingDecodeError,
-    RouteDiscoveryDecodeError,
-}
 
 // Meshtastic LoRa parameters
 const LORA_PREAMBLE_LENGTH: u16 = 16;
@@ -204,7 +172,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_serial_task(usb, cdc)).unwrap();
 
     // Initialize the node databases
-    initialize_node_database().await;
     initialize_node_database().await;
 
     info!(
@@ -446,19 +413,20 @@ fn handle_received_packet(
                     };
 
                     // Helper function to do logging while holding the database lock
-                    let log_packet = |source_opt: Option<&node_database::NodeInfo>| {
-                        if let Some(source) = source_opt {
-                            info!(
-                                "\n{} ({:?}) - RSSI: {}, SNR: {}\n    {:?}",
-                                header, source, rssi, snr, decoded_packet
-                            );
-                        } else {
-                            info!(
-                                "\n{} - RSSI: {}, SNR: {}\n    {:?}",
-                                header, rssi, snr, decoded_packet
-                            );
-                        }
-                    };
+                    let log_packet =
+                        |source_opt: Option<&meshtassy_net::node_database::NodeInfo>| {
+                            if let Some(source) = source_opt {
+                                info!(
+                                    "\n{} ({:?}) - RSSI: {}, SNR: {}\n    {:?}",
+                                    header, source, rssi, snr, decoded_packet
+                                );
+                            } else {
+                                info!(
+                                    "\n{} - RSSI: {}, SNR: {}\n    {:?}",
+                                    header, rssi, snr, decoded_packet
+                                );
+                            }
+                        };
 
                     // Do the logging while holding the database lock to avoid cloning
                     if let Ok(db_guard) = NODE_DATABASE.try_lock() {
@@ -713,6 +681,6 @@ async fn usb_serial_task(
 async fn initialize_node_database() {
     // Initialize the node database
     let mut database_guard = NODE_DATABASE.lock().await;
-    *database_guard = Some(node_database::NodeDatabase::new());
+    *database_guard = Some(meshtassy_net::node_database::NodeDatabase::new());
     info!("Node database initialized");
 }

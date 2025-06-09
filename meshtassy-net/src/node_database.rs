@@ -1,11 +1,14 @@
+#[cfg(feature = "defmt")]
 use defmt;
+
 use femtopb::{self, Message as _};
 use heapless::String;
 use meshtastic_protobufs::meshtastic::{PortNum, Telemetry};
 
 /// Simplified User struct mimicking UserLite with heapless strings
 /// Only contains essential fields needed for node identification
-#[derive(defmt::Format, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct User {
     pub long_name: String<40>, // Max 40 characters for long name
     pub short_name: String<4>, // Max 4 characters for short name
@@ -16,7 +19,8 @@ pub struct User {
 
 /// Simplified Position struct mimicking PositionLite
 /// Only contains essential location data
-#[derive(defmt::Format, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Position {
     pub latitude_i: i32,  // latitude in 1e-7 degrees
     pub longitude_i: i32, // longitude in 1e-7 degrees
@@ -26,7 +30,8 @@ pub struct Position {
 }
 
 /// Simplified device metrics for telemetry data
-#[derive(defmt::Format, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct DeviceMetrics {
     pub battery_level: u32,       // Battery percentage (0-100)
     pub voltage: f32,             // Battery voltage
@@ -36,7 +41,8 @@ pub struct DeviceMetrics {
 }
 
 /// Simplified NodeInfo struct
-#[derive(defmt::Format, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NodeInfo {
     pub num: u32, // Node number (source address)
     pub user: Option<User>,
@@ -47,7 +53,8 @@ pub struct NodeInfo {
 }
 
 /// Node database containing up to 50 nodes
-#[derive(defmt::Format, Clone, Debug)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NodeDatabase {
     pub nodes: [Option<NodeInfo>; 50], // Array of up to 50 nodes
     pub node_count: usize,             // Current number of active nodes
@@ -225,6 +232,7 @@ impl NodeDatabase {
         // Add new node if there's space
         for slot in &mut self.nodes {
             if slot.is_none() {
+                #[cfg(feature = "defmt")]
                 defmt::info!("Adding new node {}: {:?}", node_info.num, node_info);
 
                 *slot = Some(node_info);
@@ -234,7 +242,8 @@ impl NodeDatabase {
         }
 
         // If we reach here, the database is full
-        defmt::warn!("Database is full, cannot add node {}", node_info.num);
+        #[cfg(feature = "defmt")]
+        defmt::info!("Database is full, cannot add node {}", node_info.num);
         // Could implement LRU eviction here if needed
     }
     /// Update telemetry data for a specific node
@@ -252,7 +261,8 @@ impl NodeDatabase {
                 }
             }
         }
-        defmt::warn!("Node {} not found for telemetry update", node_num);
+        #[cfg(feature = "defmt")]
+        defmt::info!("Node {} not found for telemetry update", node_num);
     }
     /// Update SNR and last heard timestamp for a node
     pub fn update_node_signal(&mut self, node_num: u32, snr: f32, last_heard: u32) {
@@ -278,7 +288,8 @@ impl NodeDatabase {
                 }
             }
         }
-        defmt::warn!("Node {} not found for signal update", node_num);
+        #[cfg(feature = "defmt")]
+        defmt::info!("Node {} not found for signal update", node_num);
     }
 
     /// Get a node by its number
@@ -337,6 +348,7 @@ impl NodeDatabase {
                     node_info.snr = packet.snr as f32;
                     self.add_or_update_node(node_info);
 
+                    #[cfg(feature = "defmt")]
                     defmt::info!("Node {} user info updated", node_num);
                     true
                 } else {
@@ -361,6 +373,7 @@ impl NodeDatabase {
                     node_info.snr = packet.snr as f32;
                     self.add_or_update_node(node_info);
 
+                    #[cfg(feature = "defmt")]
                     defmt::info!("Node {} position updated", node_num);
                     true
                 } else {
@@ -382,6 +395,7 @@ impl NodeDatabase {
                         node_info.snr = packet.snr as f32;
                         self.add_or_update_node(node_info);
 
+                        #[cfg(feature = "defmt")]
                         defmt::info!("Node {} telemetry updated", node_num);
                         true
                     } else {
@@ -395,6 +409,7 @@ impl NodeDatabase {
                         node_info.snr = packet.snr as f32;
                         self.add_or_update_node(node_info);
 
+                        #[cfg(feature = "defmt")]
                         defmt::info!("Node {} basic info updated from telemetry", node_num);
                         true
                     }
@@ -413,6 +428,7 @@ impl NodeDatabase {
                 node_info.snr = packet.snr as f32;
                 self.add_or_update_node(node_info);
 
+                #[cfg(feature = "defmt")]
                 defmt::info!("Node {} basic info updated (SNR: {})", node_num, packet.snr);
                 true
             }

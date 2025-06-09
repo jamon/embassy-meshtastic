@@ -1090,6 +1090,9 @@ dependencies = [
  "base64",
  "ctr",
  "defmt 0.3.100",
+ "femtopb",
+ "heapless",
+ "meshtastic-protobufs",
 ]
 
 [[package]]

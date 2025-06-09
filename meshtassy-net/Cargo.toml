@@ -14,3 +14,6 @@ aes = { version = "0.8", default-features = false }
 ctr = { version = "0.9", default-features = false }
 base64 = { version = "0.21", default-features = false }
 defmt = { version = "0.3", optional = true }
+femtopb = { version = "0.8", default-features = false }
+heapless = { version = "0.8", default-features = false }
+meshtastic-protobufs = { path = "../meshtastic-protobufs", version = "0.1.0", features = ["defmt"] }
