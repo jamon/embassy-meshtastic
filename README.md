@@ -31,7 +31,9 @@ The modular design of embassy-rs makes it relatively easy to port to other board
   - Traceroute
 
 ### Near term goals
-- [ ] Node database
+- [-] Node database
+  - [x] RAM Node database 
+  - [ ] Persistence to Flash
 - [ ] Channel database (support encrypting/decrypting other channels)
 - [ ] Private messages (PKI encryption)
 - [ ] Support for other Embassy-supported hardware (RP2040, ESP32 primarily, possibly others)
