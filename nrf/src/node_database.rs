@@ -307,6 +307,7 @@ impl NodeDatabase {
         }
         "UNK" // Unknown/default short name
     }
+
     /// Get all active nodes
     pub fn get_nodes(&self) -> impl Iterator<Item = &NodeInfo> {
         self.nodes.iter().filter_map(|n| n.as_ref())

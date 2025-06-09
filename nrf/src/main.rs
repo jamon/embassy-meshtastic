@@ -443,23 +443,33 @@ fn handle_received_packet(
                         }
                         femtopb::EnumValue::Unknown(_) => DecodedPacket::Unknown(portnum),
                         _ => DecodedPacket::Other(portnum),
-                    }; // Single log statement for all packet types with short name lookup
-                    if let Ok(database_guard) = NODE_DATABASE.try_lock() {
-                        let source = if let Some(ref db) = *database_guard {
-                            db.get_node(header.source)
+                    };
+
+                    // Helper function to do logging while holding the database lock
+                    let log_packet = |source_opt: Option<&node_database::NodeInfo>| {
+                        if let Some(source) = source_opt {
+                            info!(
+                                "\n{} ({:?}) - RSSI: {}, SNR: {}\n    {:?}",
+                                header, source, rssi, snr, decoded_packet
+                            );
                         } else {
-                            None
-                        };
-                        info!(
-                            "\n{} ({}) - RSSI: {}, SNR: {}\n    {:?}",
-                            header, source, rssi, snr, decoded_packet
-                        );
+                            info!(
+                                "\n{} - RSSI: {}, SNR: {}\n    {:?}",
+                                header, rssi, snr, decoded_packet
+                            );
+                        }
+                    };
+
+                    // Do the logging while holding the database lock to avoid cloning
+                    if let Ok(db_guard) = NODE_DATABASE.try_lock() {
+                        if let Some(db) = db_guard.as_ref() {
+                            log_packet(db.get_node(header.source));
+                        } else {
+                            log_packet(None);
+                        }
                     } else {
-                        // Database is locked, fall back to original logging
-                        info!(
-                            "\n{} - RSSI: {}, SNR: {}\n    {:?}",
-                            header, rssi, snr, decoded_packet
-                        );
+                        // If we can't get the lock, just log without source info
+                        log_packet(None);
                     }
                 }
                 Err(err) => {
