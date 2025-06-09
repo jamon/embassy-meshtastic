@@ -18,7 +18,6 @@ use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{Sx1262, Sx126x, Sx126xVariant, TcxoCtrlVoltage};
 use lora_phy::{mod_params::*, sx126x};
 use lora_phy::{LoRa, RxMode};
-use meshtastic_crypto::header::MeshtasticHeaderFlags;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -28,7 +27,8 @@ use embassy_nrf::usb::{Driver, Instance};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 
-use meshtastic_crypto::{decrypt_meshtastic_packet, encrypt_meshtastic_packet, MeshtasticHeader};
+use meshtassy_net::header::MeshtasticHeaderFlags;
+use meshtassy_net::{decrypt_meshtastic_packet, encrypt_meshtastic_packet, MeshtasticHeader};
 use meshtastic_protobufs::meshtastic::{
     Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User,
 };

@@ -499,51 +499,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embassy-nrf-lora"
-version = "0.1.0"
-dependencies = [
- "aes",
- "anyhow",
- "base64",
- "cortex-m",
- "cortex-m-rt",
- "ctr",
- "defmt 1.0.1",
- "defmt-rtt",
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-net-enc28j60",
- "embassy-net-esp-hosted",
- "embassy-nrf",
- "embassy-sync",
- "embassy-time 0.4.0 (git+https://github.com/embassy-rs/embassy.git?rev=4766cc6f9756b54bb2e25be5ba5276538ea4917b)",
- "embassy-usb",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-io",
- "embedded-io-async",
- "embedded-storage",
- "femtopb",
- "femtopb-build",
- "fixed",
- "heapless",
- "lora-phy",
- "lorawan-device",
- "meshtastic-crypto",
- "meshtastic-protobufs",
- "microfft",
- "num-integer",
- "panic-probe",
- "rand",
- "serde",
- "static_cell",
- "usbd-hid",
- "walkdir",
-]
-
-[[package]]
 name = "embassy-sync"
 version = "0.7.0"
 source = "git+https://github.com/embassy-rs/embassy.git?rev=4766cc6f9756b54bb2e25be5ba5276538ea4917b#4766cc6f9756b54bb2e25be5ba5276538ea4917b"
@@ -1128,13 +1083,58 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
 
 [[package]]
-name = "meshtastic-crypto"
+name = "meshtassy-net"
 version = "0.1.0"
 dependencies = [
  "aes",
  "base64",
  "ctr",
  "defmt 0.3.100",
+]
+
+[[package]]
+name = "meshtassy-nrf"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "anyhow",
+ "base64",
+ "cortex-m",
+ "cortex-m-rt",
+ "ctr",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-net",
+ "embassy-net-enc28j60",
+ "embassy-net-esp-hosted",
+ "embassy-nrf",
+ "embassy-sync",
+ "embassy-time 0.4.0 (git+https://github.com/embassy-rs/embassy.git?rev=4766cc6f9756b54bb2e25be5ba5276538ea4917b)",
+ "embassy-usb",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-io",
+ "embedded-io-async",
+ "embedded-storage",
+ "femtopb",
+ "femtopb-build",
+ "fixed",
+ "heapless",
+ "lora-phy",
+ "lorawan-device",
+ "meshtassy-net",
+ "meshtastic-protobufs",
+ "microfft",
+ "num-integer",
+ "panic-probe",
+ "rand",
+ "serde",
+ "static_cell",
+ "usbd-hid",
+ "walkdir",
 ]
 
 [[package]]
