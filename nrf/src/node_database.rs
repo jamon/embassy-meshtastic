@@ -1,6 +1,7 @@
 use defmt;
-use femtopb;
+use femtopb::{self, Message as _};
 use heapless::String;
+use meshtastic_protobufs::meshtastic::{PortNum, Telemetry};
 
 /// Simplified User struct mimicking UserLite with heapless strings
 /// Only contains essential fields needed for node identification
@@ -203,19 +204,19 @@ impl NodeDatabase {
     /// Add or update a node in the database
     pub fn add_or_update_node(&mut self, node_info: NodeInfo) {
         // Look for existing node with same number
-        defmt::info!("[NODE_DATABASE] Adding or updating node {}:", node_info.num);
+        // defmt::info!("[NODE_DATABASE] Adding or updating node {}:", node_info.num);
         for existing_node in &mut self.nodes {
             if let Some(existing) = existing_node {
                 if existing.num == node_info.num {
-                    // Log the before state
-                    defmt::info!("Updating existing node {}:", node_info.num);
-                    defmt::info!("  Before: {:?}", existing);
+                    // // Log the before state
+                    // defmt::info!("Updating existing node {}:", node_info.num);
+                    // defmt::info!("  Before: {:?}", existing);
 
                     // Update existing node
                     *existing = node_info;
 
                     // Log the after state
-                    defmt::info!("  After: {:?}", existing);
+                    // defmt::info!("  After: {:?}", existing);
                     return;
                 }
             }
@@ -224,8 +225,7 @@ impl NodeDatabase {
         // Add new node if there's space
         for slot in &mut self.nodes {
             if slot.is_none() {
-                defmt::info!("Adding new node {}:", node_info.num);
-                defmt::info!("  New node: {:?}", node_info);
+                defmt::info!("Adding new node {}: {:?}", node_info.num, node_info);
 
                 *slot = Some(node_info);
                 self.node_count += 1;
@@ -242,12 +242,12 @@ impl NodeDatabase {
         for node in &mut self.nodes {
             if let Some(existing) = node {
                 if existing.num == node_num {
-                    defmt::info!("Updating telemetry for node {}:", node_num);
-                    defmt::info!("  Before: metrics = {:?}", existing.device_metrics);
+                    // defmt::info!("Updating telemetry for node {}:", node_num);
+                    // defmt::info!("  Before: metrics = {:?}", existing.device_metrics);
 
                     existing.device_metrics = Some(device_metrics);
 
-                    defmt::info!("  After: metrics = {:?}", existing.device_metrics);
+                    // defmt::info!("  After: metrics = {:?}", existing.device_metrics);
                     return;
                 }
             }
@@ -259,21 +259,21 @@ impl NodeDatabase {
         for node in &mut self.nodes {
             if let Some(existing) = node {
                 if existing.num == node_num {
-                    defmt::info!("Updating signal info for node {}:", node_num);
-                    defmt::info!(
-                        "  Before: SNR = {}, last_heard = {}",
-                        existing.snr,
-                        existing.last_heard
-                    );
+                    // defmt::info!("Updating signal info for node {}:", node_num);
+                    // defmt::info!(
+                    //     "  Before: SNR = {}, last_heard = {}",
+                    //     existing.snr,
+                    //     existing.last_heard
+                    // );
 
                     existing.snr = snr;
                     existing.last_heard = last_heard;
 
-                    defmt::info!(
-                        "  After: SNR = {}, last_heard = {}",
-                        existing.snr,
-                        existing.last_heard
-                    );
+                    // defmt::info!(
+                    //     "  After: SNR = {}, last_heard = {}",
+                    //     existing.snr,
+                    //     existing.last_heard
+                    // );
                     return;
                 }
             }
@@ -310,5 +310,111 @@ impl NodeDatabase {
     /// Get all active nodes
     pub fn get_nodes(&self) -> impl Iterator<Item = &NodeInfo> {
         self.nodes.iter().filter_map(|n| n.as_ref())
+    }
+
+    /// Add or update a node from a received packet
+    /// This method handles the packet decoding and node database update
+    pub fn add_or_update_node_from_packet(&mut self, packet: &crate::Packet) -> bool {
+        let node_num = packet.header.source;
+
+        match packet.port_num {
+            femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
+                if let Ok(user_info) = meshtastic_protobufs::meshtastic::User::decode(
+                    &packet.payload[..packet.payload_len],
+                ) {
+                    // Create a NodeInfo with the user information
+                    let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
+                        let mut new_node = NodeInfo::default();
+                        new_node.num = node_num;
+                        new_node
+                    });
+
+                    // Update user info using conversion method
+                    node_info.user = Some(User::from_protobuf(&user_info));
+
+                    // Update SNR and add to database
+                    node_info.snr = packet.snr as f32;
+                    self.add_or_update_node(node_info);
+
+                    defmt::info!("Node {} user info updated", node_num);
+                    true
+                } else {
+                    false
+                }
+            }
+            femtopb::EnumValue::Known(PortNum::PositionApp) => {
+                if let Ok(position) = meshtastic_protobufs::meshtastic::Position::decode(
+                    &packet.payload[..packet.payload_len],
+                ) {
+                    // Create a NodeInfo with the position information
+                    let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
+                        let mut new_node = NodeInfo::default();
+                        new_node.num = node_num;
+                        new_node
+                    });
+
+                    // Update position info using conversion method
+                    node_info.position = Some(Position::from_protobuf(&position));
+
+                    // Update SNR and add to database
+                    node_info.snr = packet.snr as f32;
+                    self.add_or_update_node(node_info);
+
+                    defmt::info!("Node {} position updated", node_num);
+                    true
+                } else {
+                    false
+                }
+            }
+            femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
+                if let Ok(telemetry) = Telemetry::decode(&packet.payload[..packet.payload_len]) {
+                    // Handle telemetry data
+                    if let Some(device_metrics) = DeviceMetrics::from_protobuf(&telemetry) {
+                        // Update or create node with telemetry data
+                        let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
+                            let mut new_node = NodeInfo::default();
+                            new_node.num = node_num;
+                            new_node
+                        });
+
+                        node_info.device_metrics = Some(device_metrics);
+                        node_info.snr = packet.snr as f32;
+                        self.add_or_update_node(node_info);
+
+                        defmt::info!("Node {} telemetry updated", node_num);
+                        true
+                    } else {
+                        // For other telemetry types, just update basic info
+                        let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
+                            let mut new_node = NodeInfo::default();
+                            new_node.num = node_num;
+                            new_node
+                        });
+
+                        node_info.snr = packet.snr as f32;
+                        self.add_or_update_node(node_info);
+
+                        defmt::info!("Node {} basic info updated from telemetry", node_num);
+                        true
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => {
+                // For other packet types, just update the basic info (SNR, last_heard)
+                let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
+                    let mut new_node = NodeInfo::default();
+                    new_node.num = node_num;
+                    new_node
+                });
+
+                node_info.snr = packet.snr as f32;
+                self.add_or_update_node(node_info);
+
+                defmt::info!("Node {} basic info updated (SNR: {})", node_num, packet.snr);
+                true
+            }
+        }
     }
 }

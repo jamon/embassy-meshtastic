@@ -117,67 +117,10 @@ async fn packet_processor_task() {
             }
         }; // Process the received packet
 
-        {
-            let database_guard = NODE_DATABASE.lock().await;
-            let source_short_name = if let Some(ref db) = *database_guard {
-                db.get_node_short_name(packet.header.source)
-            } else {
-                "UNK"
-            };
-
-            info!("Packet processor received packet:");
-            info!("  Port: {:?}", packet.port_num);
-            info!("  RSSI: {}, SNR: {}", packet.rssi, packet.snr);
-            info!(
-                "  Source: 0x{:08X} ({}), Dest: 0x{:08X}",
-                packet.header.source, source_short_name, packet.header.destination
-            );
-        }
-        // Decode the specific payload based on port type
-        match packet.port_num {
-            femtopb::EnumValue::Known(PortNum::TextMessageApp) => {
-                if let Ok(text) = core::str::from_utf8(&packet.payload[..packet.payload_len]) {
-                    info!("  Text Message: \"{}\"", text);
-                } else {
-                    info!(
-                        "  Text Message (invalid UTF-8): {:02X}",
-                        &packet.payload[..packet.payload_len]
-                    );
-                }
-            }
-            femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
-                match Telemetry::decode(&packet.payload[..packet.payload_len]) {
-                    Ok(telemetry) => info!("  Telemetry: {:?}", telemetry),
-                    Err(_) => info!("  Telemetry (decode error)"),
-                }
-            }
-            femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
-                match User::decode(&packet.payload[..packet.payload_len]) {
-                    Ok(user_info) => {
-                        info!("  User Info: {:?}", user_info);
-                        // Add or update the node in the database using the packet
-                        let _success = add_or_update_node(&packet).await;
-                    }
-                    Err(_) => info!("  User Info (decode error)"),
-                }
-            }
-            femtopb::EnumValue::Known(PortNum::PositionApp) => {
-                match Position::decode(&packet.payload[..packet.payload_len]) {
-                    Ok(position) => {
-                        info!("  Position: {:?}", position);
-                        // Add or update the node in the database using the packet
-                        let _success = add_or_update_node(&packet).await;
-                    }
-                    Err(_) => info!("  Position (decode error)"),
-                }
-            }
-            _ => {
-                info!("  Unknown/Other port type: {:?}", packet.port_num);
-                info!(
-                    "  Raw payload: {:02X}",
-                    &packet.payload[..packet.payload_len]
-                );
-            }
+        // Add or update the node in the database using the packet
+        let mut db_guard = NODE_DATABASE.lock().await;
+        if let Some(ref mut db) = *db_guard {
+            let _success = db.add_or_update_node_from_packet(&packet);
         }
     }
 }
@@ -502,14 +445,14 @@ fn handle_received_packet(
                         _ => DecodedPacket::Other(portnum),
                     }; // Single log statement for all packet types with short name lookup
                     if let Ok(database_guard) = NODE_DATABASE.try_lock() {
-                        let source_short_name = if let Some(ref db) = *database_guard {
-                            db.get_node_short_name(header.source)
+                        let source = if let Some(ref db) = *database_guard {
+                            db.get_node(header.source)
                         } else {
-                            "UNK"
+                            None
                         };
                         info!(
                             "\n{} ({}) - RSSI: {}, SNR: {}\n    {:?}",
-                            header, source_short_name, rssi, snr, decoded_packet
+                            header, source, rssi, snr, decoded_packet
                         );
                     } else {
                         // Database is locked, fall back to original logging
@@ -762,77 +705,4 @@ async fn initialize_node_database() {
     let mut database_guard = NODE_DATABASE.lock().await;
     *database_guard = Some(node_database::NodeDatabase::new());
     info!("Node database initialized");
-}
-
-async fn add_or_update_node(packet: &Packet) -> bool {
-    use femtopb::Message as _;
-
-    let node_num = packet.header.source;
-    let mut db_guard = NODE_DATABASE.lock().await;
-
-    if let Some(ref mut db) = *db_guard {
-        match packet.port_num {
-            femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
-                if let Ok(user_info) = User::decode(&packet.payload[..packet.payload_len]) {
-                    // Create a NodeInfo with the user information
-                    let mut node_info = db.get_node(node_num).cloned().unwrap_or_else(|| {
-                        let mut new_node = node_database::NodeInfo::default();
-                        new_node.num = node_num;
-                        new_node
-                    });
-
-                    // Update user info using conversion method
-                    node_info.user = Some(node_database::User::from_protobuf(&user_info));
-
-                    // Update SNR and add to database
-                    node_info.snr = packet.snr as f32;
-                    db.add_or_update_node(node_info);
-
-                    info!("Node {} user info updated", node_num);
-                    true
-                } else {
-                    false
-                }
-            }
-            femtopb::EnumValue::Known(PortNum::PositionApp) => {
-                if let Ok(position) = Position::decode(&packet.payload[..packet.payload_len]) {
-                    // Create a NodeInfo with the position information
-                    let mut node_info = db.get_node(node_num).cloned().unwrap_or_else(|| {
-                        let mut new_node = node_database::NodeInfo::default();
-                        new_node.num = node_num;
-                        new_node
-                    });
-
-                    // Update position info using conversion method
-                    node_info.position = Some(node_database::Position::from_protobuf(&position));
-
-                    // Update SNR and add to database
-                    node_info.snr = packet.snr as f32;
-                    db.add_or_update_node(node_info);
-
-                    info!("Node {} position updated", node_num);
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => {
-                // For other packet types, just update the basic info (SNR, last_heard)
-                let mut node_info = db.get_node(node_num).cloned().unwrap_or_else(|| {
-                    let mut new_node = node_database::NodeInfo::default();
-                    new_node.num = node_num;
-                    new_node
-                });
-
-                node_info.snr = packet.snr as f32;
-                db.add_or_update_node(node_info);
-
-                info!("Node {} basic info updated (SNR: {})", node_num, packet.snr);
-                true
-            }
-        }
-    } else {
-        info!("Node database not initialized");
-        false
-    }
 }
