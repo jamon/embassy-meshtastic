@@ -142,7 +142,7 @@ The goal of the project is to be completely compatible with meshtastic firmware.
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
+This project is licensed under the GPL V3 - see [LICENSE](LICENSE) for details.
 
 ## Acknowledgments
 
