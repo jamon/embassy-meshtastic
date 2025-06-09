@@ -10,8 +10,7 @@ use embassy_nrf::{bind_interrupts, pac, peripherals, rng, spim, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
-use static_cell::StaticCell;
-use embassy_time::{Delay};
+use embassy_time::Delay;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use femtopb::Message as _;
@@ -20,25 +19,27 @@ use lora_phy::sx126x::{Sx1262, Sx126x, Sx126xVariant, TcxoCtrlVoltage};
 use lora_phy::{mod_params::*, sx126x};
 use lora_phy::{LoRa, RxMode};
 use meshtastic_crypto::header::MeshtasticHeaderFlags;
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
+use embassy_futures::join::join;
 use embassy_nrf::usb::vbus_detect::{HardwareVbusDetect, VbusDetect};
 use embassy_nrf::usb::{Driver, Instance};
-use embassy_usb::{Builder, Config};
 use embassy_usb::driver::EndpointError;
-use embassy_futures::join::join;
+use embassy_usb::{Builder, Config};
 
 use meshtastic_crypto::{decrypt_meshtastic_packet, encrypt_meshtastic_packet, MeshtasticHeader};
 use meshtastic_protobufs::meshtastic::{
-    Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User
+    Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User,
 };
 
 mod node_database;
 
-static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet, 8, 8, 1> = PubSubChannel::<CriticalSectionRawMutex, Packet, 8, 8, 1>::new();
+static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet, 8, 8, 1> =
+    PubSubChannel::<CriticalSectionRawMutex, Packet, 8, 8, 1>::new();
 
-static NODE_DATABASE: Mutex<CriticalSectionRawMutex, Option<node_database::NodeDatabase>> = Mutex::new(None);
-
+static NODE_DATABASE: Mutex<CriticalSectionRawMutex, Option<node_database::NodeDatabase>> =
+    Mutex::new(None);
 
 // USB static allocations for Embassy's Forever pattern
 static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
@@ -100,15 +101,13 @@ bind_interrupts!(struct Irqs {
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
 });
 
-
-
 // This example task processes incoming packets from the Meshtastic radio.
 // It subscribes to the PACKET_CHANNEL and handles each packet as it arrives.
 #[embassy_executor::task]
 async fn packet_processor_task() {
     info!("Starting packet processor task");
     let mut subscriber = PACKET_CHANNEL.subscriber().unwrap();
-      loop {
+    loop {
         let wait_result = subscriber.next_message().await;
         let packet = match wait_result {
             embassy_sync::pubsub::WaitResult::Message(msg) => msg,
@@ -116,58 +115,68 @@ async fn packet_processor_task() {
                 info!("Packet processor lagged, continuing...");
                 continue;
             }
-        };        // Process the received packet
+        }; // Process the received packet
 
-        let database_guard = NODE_DATABASE.lock().await;
-        let source_short_name = if let Some(ref db) = *database_guard {
-            db.get_node_short_name(packet.header.source)
-        } else {
-            "UNK"
-        };
+        {
+            let database_guard = NODE_DATABASE.lock().await;
+            let source_short_name = if let Some(ref db) = *database_guard {
+                db.get_node_short_name(packet.header.source)
+            } else {
+                "UNK"
+            };
 
-
-        info!("Packet processor received packet:");
-        info!("  Port: {:?}", packet.port_num);
-        info!("  RSSI: {}, SNR: {}", packet.rssi, packet.snr);
-        info!("  Source: 0x{:08X} ({}), Dest: 0x{:08X}", 
-                packet.header.source, source_short_name, packet.header.destination);
-
+            info!("Packet processor received packet:");
+            info!("  Port: {:?}", packet.port_num);
+            info!("  RSSI: {}, SNR: {}", packet.rssi, packet.snr);
+            info!(
+                "  Source: 0x{:08X} ({}), Dest: 0x{:08X}",
+                packet.header.source, source_short_name, packet.header.destination
+            );
+        }
         // Decode the specific payload based on port type
         match packet.port_num {
             femtopb::EnumValue::Known(PortNum::TextMessageApp) => {
                 if let Ok(text) = core::str::from_utf8(&packet.payload[..packet.payload_len]) {
                     info!("  Text Message: \"{}\"", text);
                 } else {
-                    info!("  Text Message (invalid UTF-8): {:02X}", &packet.payload[..packet.payload_len]);
+                    info!(
+                        "  Text Message (invalid UTF-8): {:02X}",
+                        &packet.payload[..packet.payload_len]
+                    );
                 }
-            },            
+            }
             femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
                 match Telemetry::decode(&packet.payload[..packet.payload_len]) {
                     Ok(telemetry) => info!("  Telemetry: {:?}", telemetry),
                     Err(_) => info!("  Telemetry (decode error)"),
                 }
-            },            femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
+            }
+            femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
                 match User::decode(&packet.payload[..packet.payload_len]) {
                     Ok(user_info) => {
                         info!("  User Info: {:?}", user_info);
                         // Add or update the node in the database using the packet
                         let _success = add_or_update_node(&packet).await;
-                    },
+                    }
                     Err(_) => info!("  User Info (decode error)"),
                 }
-            },            femtopb::EnumValue::Known(PortNum::PositionApp) => {
+            }
+            femtopb::EnumValue::Known(PortNum::PositionApp) => {
                 match Position::decode(&packet.payload[..packet.payload_len]) {
                     Ok(position) => {
                         info!("  Position: {:?}", position);
                         // Add or update the node in the database using the packet
                         let _success = add_or_update_node(&packet).await;
-                    },
+                    }
                     Err(_) => info!("  Position (decode error)"),
                 }
-            },
+            }
             _ => {
                 info!("  Unknown/Other port type: {:?}", packet.port_num);
-                info!("  Raw payload: {:02X}", &packet.payload[..packet.payload_len]);
+                info!(
+                    "  Raw payload: {:02X}",
+                    &packet.payload[..packet.payload_len]
+                );
             }
         }
     }
@@ -181,7 +190,8 @@ async fn main(spawner: Spawner) {
     info!("Enabling ext hfosc...");
     pac::CLOCK.tasks_hfclkstart().write_value(1);
     while pac::CLOCK.events_hfclkstarted().read() != 1 {}
-    info!("Ext hfosc enabled");    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    info!("Ext hfosc enabled");
+    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
 
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
@@ -205,12 +215,9 @@ async fn main(spawner: Spawner) {
         msos_descriptor,
         control_buf,
     );
-    
+
     let cdc = CdcAcmClass::new(&mut builder, state, 64);
     let usb = builder.build();
-
-
-
 
     let nss = Output::new(p.P0_04, Level::High, OutputDrive::Standard);
     let reset = Output::new(p.P0_28, Level::High, OutputDrive::Standard);
@@ -244,9 +251,10 @@ async fn main(spawner: Spawner) {
 
     let mut led_red = Output::new(p.P0_26, Level::Low, OutputDrive::Standard);
     let mut led_green = Output::new(p.P0_30, Level::Low, OutputDrive::Standard);
-    let mut led_blue = Output::new(p.P0_06, Level::Low, OutputDrive::Standard);    led_green.set_high();
+    let mut led_blue = Output::new(p.P0_06, Level::Low, OutputDrive::Standard);
+    led_green.set_high();
     led_blue.set_high();
-    led_red.set_high();    // Spawn the packet processor task
+    led_red.set_high(); // Spawn the packet processor task
     spawner.spawn(packet_processor_task()).unwrap();
 
     // Spawn the USB serial task
@@ -255,7 +263,7 @@ async fn main(spawner: Spawner) {
     // Initialize the node databases
     initialize_node_database().await;
     initialize_node_database().await;
-    
+
     info!(
         "Starting Meshtastic Radio on frequency {} Hz with syncword 0x{:02X}",
         LORA_FREQUENCY_IN_HZ, LORA_SYNCWORD
@@ -492,7 +500,7 @@ fn handle_received_packet(
                         }
                         femtopb::EnumValue::Unknown(_) => DecodedPacket::Unknown(portnum),
                         _ => DecodedPacket::Other(portnum),
-                    };                    // Single log statement for all packet types with short name lookup
+                    }; // Single log statement for all packet types with short name lookup
                     if let Ok(database_guard) = NODE_DATABASE.try_lock() {
                         let source_short_name = if let Some(ref db) = *database_guard {
                             db.get_node_short_name(header.source)
@@ -589,7 +597,7 @@ fn create_text_message_packet(
 
 fn format_packet_for_serial<'a>(packet: &Packet, buffer: &'a mut [u8]) -> Option<&'a [u8]> {
     let mut pos = 0;
-    
+
     // Helper function to append string to buffer
     let append_str = |buf: &mut [u8], position: &mut usize, s: &str| -> bool {
         let bytes = s.as_bytes();
@@ -600,7 +608,7 @@ fn format_packet_for_serial<'a>(packet: &Packet, buffer: &'a mut [u8]) -> Option
         *position += bytes.len();
         true
     };
-    
+
     // Helper function to append hex byte
     let append_hex = |buf: &mut [u8], position: &mut usize, byte: u8| -> bool {
         if *position + 2 > buf.len() {
@@ -612,23 +620,42 @@ fn format_packet_for_serial<'a>(packet: &Packet, buffer: &'a mut [u8]) -> Option
         *position += 2;
         true
     };
-    
+
     // Format packet information
-    if !append_str(buffer, &mut pos, "{\"source\":\"0x") { return None; }
-    for i in (0..4).rev() {
-        if !append_hex(buffer, &mut pos, (packet.header.source >> (i * 8)) as u8) { return None; }
+    if !append_str(buffer, &mut pos, "{\"source\":\"0x") {
+        return None;
     }
-    if !append_str(buffer, &mut pos, "\",\"dest\":\"0x") { return None; }
     for i in (0..4).rev() {
-        if !append_hex(buffer, &mut pos, (packet.header.destination >> (i * 8)) as u8) { return None; }
+        if !append_hex(buffer, &mut pos, (packet.header.source >> (i * 8)) as u8) {
+            return None;
+        }
     }
-    if !append_str(buffer, &mut pos, "\",\"id\":\"0x") { return None; }
+    if !append_str(buffer, &mut pos, "\",\"dest\":\"0x") {
+        return None;
+    }
     for i in (0..4).rev() {
-        if !append_hex(buffer, &mut pos, (packet.header.packet_id >> (i * 8)) as u8) { return None; }
+        if !append_hex(
+            buffer,
+            &mut pos,
+            (packet.header.destination >> (i * 8)) as u8,
+        ) {
+            return None;
+        }
     }
-    
+    if !append_str(buffer, &mut pos, "\",\"id\":\"0x") {
+        return None;
+    }
+    for i in (0..4).rev() {
+        if !append_hex(buffer, &mut pos, (packet.header.packet_id >> (i * 8)) as u8) {
+            return None;
+        }
+    }
+
     // Add port type
-    if !append_str(buffer, &mut pos, "\",\"port\":\"") { return None; }    let port_str = match packet.port_num {
+    if !append_str(buffer, &mut pos, "\",\"port\":\"") {
+        return None;
+    }
+    let port_str = match packet.port_num {
         femtopb::EnumValue::Known(PortNum::TextMessageApp) => "TEXT",
         femtopb::EnumValue::Known(PortNum::TelemetryApp) => "TELEMETRY",
         femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO",
@@ -636,10 +663,14 @@ fn format_packet_for_serial<'a>(packet: &Packet, buffer: &'a mut [u8]) -> Option
         femtopb::EnumValue::Unknown(_) => "UNKNOWN",
         _ => "OTHER",
     };
-    if !append_str(buffer, &mut pos, port_str) { return None; }
-    
-    if !append_str(buffer, &mut pos, "\",\"payload\":\"") { return None; }
-    
+    if !append_str(buffer, &mut pos, port_str) {
+        return None;
+    }
+
+    if !append_str(buffer, &mut pos, "\",\"payload\":\"") {
+        return None;
+    }
+
     // Add payload as hex string (limit to avoid buffer overflow)
     let payload_limit = packet.payload_len.min(32);
     for i in 0..payload_limit {
@@ -647,9 +678,11 @@ fn format_packet_for_serial<'a>(packet: &Packet, buffer: &'a mut [u8]) -> Option
             break;
         }
     }
-    
-    if !append_str(buffer, &mut pos, "\"}\r\n") { return None; }
-    
+
+    if !append_str(buffer, &mut pos, "\"}\r\n") {
+        return None;
+    }
+
     Some(&buffer[..pos])
 }
 
@@ -661,7 +694,7 @@ impl From<EndpointError> for Disconnected {
             EndpointError::BufferOverflow => {
                 info!("Buffer overflow");
                 Disconnected {}
-            },
+            }
             EndpointError::Disabled => Disconnected {},
         }
     }
@@ -671,7 +704,7 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
     class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
 ) -> Result<(), Disconnected> {
     let mut subscriber = PACKET_CHANNEL.subscriber().unwrap();
-    
+
     loop {
         let wait_result = subscriber.next_message().await;
         let packet = match wait_result {
@@ -682,16 +715,16 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
                 continue;
             }
         };
-        
+
         // Format packet as JSON-like string for serial output
         let mut buffer = [0u8; 512];
         let formatted = format_packet_for_serial(&packet, &mut buffer);
-        
+
         if let Some(data) = formatted {
             // Split data into 64-byte chunks to stay within USB packet limits
             for chunk in data.chunks(64) {
                 match class.write_packet(chunk).await {
-                    Ok(_) => {},
+                    Ok(_) => {}
                     Err(_) => return Err(Disconnected {}),
                 }
             }
@@ -702,10 +735,16 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
 // USB Serial task - handles USB CDC ACM communication
 // This task will manage the USB serial interface for debugging and communication
 #[embassy_executor::task]
-async fn usb_serial_task(mut usb: embassy_usb::UsbDevice<'static, Driver<'static, peripherals::USBD, HardwareVbusDetect>>, mut cdc: CdcAcmClass<'static, Driver<'static, peripherals::USBD, HardwareVbusDetect>>) {
+async fn usb_serial_task(
+    mut usb: embassy_usb::UsbDevice<
+        'static,
+        Driver<'static, peripherals::USBD, HardwareVbusDetect>,
+    >,
+    mut cdc: CdcAcmClass<'static, Driver<'static, peripherals::USBD, HardwareVbusDetect>>,
+) {
     info!("Starting USB serial task");
     let usb_fut = usb.run();
-    
+
     let packet_forwarder_fut = async {
         info!("Waiting for USB connection...");
         loop {
@@ -727,10 +766,10 @@ async fn initialize_node_database() {
 
 async fn add_or_update_node(packet: &Packet) -> bool {
     use femtopb::Message as _;
-    
+
     let node_num = packet.header.source;
     let mut db_guard = NODE_DATABASE.lock().await;
-    
+
     if let Some(ref mut db) = *db_guard {
         match packet.port_num {
             femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
@@ -741,20 +780,20 @@ async fn add_or_update_node(packet: &Packet) -> bool {
                         new_node.num = node_num;
                         new_node
                     });
-                    
+
                     // Update user info using conversion method
                     node_info.user = Some(node_database::User::from_protobuf(&user_info));
-                    
+
                     // Update SNR and add to database
                     node_info.snr = packet.snr as f32;
                     db.add_or_update_node(node_info);
-                    
+
                     info!("Node {} user info updated", node_num);
                     true
                 } else {
                     false
                 }
-            },
+            }
             femtopb::EnumValue::Known(PortNum::PositionApp) => {
                 if let Ok(position) = Position::decode(&packet.payload[..packet.payload_len]) {
                     // Create a NodeInfo with the position information
@@ -763,20 +802,20 @@ async fn add_or_update_node(packet: &Packet) -> bool {
                         new_node.num = node_num;
                         new_node
                     });
-                    
+
                     // Update position info using conversion method
                     node_info.position = Some(node_database::Position::from_protobuf(&position));
-                    
+
                     // Update SNR and add to database
                     node_info.snr = packet.snr as f32;
                     db.add_or_update_node(node_info);
-                    
+
                     info!("Node {} position updated", node_num);
                     true
                 } else {
                     false
                 }
-            },
+            }
             _ => {
                 // For other packet types, just update the basic info (SNR, last_heard)
                 let mut node_info = db.get_node(node_num).cloned().unwrap_or_else(|| {
@@ -784,10 +823,10 @@ async fn add_or_update_node(packet: &Packet) -> bool {
                     new_node.num = node_num;
                     new_node
                 });
-                
+
                 node_info.snr = packet.snr as f32;
                 db.add_or_update_node(node_info);
-                
+
                 info!("Node {} basic info updated (SNR: {})", node_num, packet.snr);
                 true
             }

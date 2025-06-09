@@ -203,6 +203,7 @@ impl NodeDatabase {
     /// Add or update a node in the database
     pub fn add_or_update_node(&mut self, node_info: NodeInfo) {
         // Look for existing node with same number
+        defmt::info!("[NODE_DATABASE] Adding or updating node {}:", node_info.num);
         for existing_node in &mut self.nodes {
             if let Some(existing) = existing_node {
                 if existing.num == node_info.num {
