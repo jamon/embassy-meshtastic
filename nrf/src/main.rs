@@ -31,6 +31,7 @@ use meshtassy_net::header::HeaderFlags;
 use meshtassy_net::{
     Decrypted, Encrypted, Header, Packet, Decoded,
 };
+use meshtassy_net::key::ChannelKey;
 use meshtastic_protobufs::meshtastic::{
     Data, PortNum,
 };
@@ -250,7 +251,9 @@ async fn main(spawner: Spawner) {
     if let Some(packet_len) =
         create_text_message_packet(&tx_header, "Hello, world!", &[0x01u8], 1, &mut tx_buffer)
     {
-        info!("Created message packet with length: {}", packet_len);        // Test our packet decoding by processing it through handle_received_packet
+        info!("Created message packet with length: {}", packet_len);
+        
+        // Test our packet decoding by processing it through handle_received_packet
         info!("Testing packet decoding with our created packet:");
         handle_received_packet(
             &tx_buffer,
@@ -311,6 +314,29 @@ async fn main(spawner: Spawner) {
                 );
             }
             Err(err) => info!("rx unsuccessful = {}", err),
+        }    }
+}
+
+fn log_packet_info(
+    header: &Header, 
+    node_info: Option<&meshtassy_net::node_database::NodeInfo>, 
+    rssi: i16, 
+    snr: i16, 
+    port_name: &str, 
+    payload: &[u8]
+) {
+    match node_info {
+        Some(source) => {
+            info!(
+                "\n{} ({:?}) - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
+                header, source, rssi, snr, port_name, payload
+            );
+        }
+        None => {
+            info!(
+                "\n{} - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
+                header, rssi, snr, port_name, payload
+            );
         }
     }
 }
@@ -321,96 +347,83 @@ fn handle_received_packet(
     snr: i16,
     rssi: i16,
 ) {
-    use meshtassy_net::key::ChannelKey;
-    
+
+    // Create channel key from raw bytes (1-byte key with default key + LSB replacement)
+    // @TODO need to replace this with a proper key management system
+    let Some(key) = ChannelKey::from_bytes(&[0x01; 1], 1) else {
+        error!("✗ Failed to create channel key");
+        return;
+    };
+    trace!("✓ Successfully created channel key for decryption");
+
+
     info!("=== Processing received packet ===");
     info!("Received {} bytes, SNR: {}, RSSI: {}", received_len, snr, rssi);
     info!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
-    
-    // Create encrypted packet from received bytes
-    if let Some(encrypted_pkt) = Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8) {
-        info!("Successfully parsed encrypted packet");
-        
-        // Create channel key from raw bytes (1-byte key with default key + LSB replacement)
-        if let Some(key) = ChannelKey::from_bytes(&[0x01; 1], 1) {
-            info!("Successfully created channel key for decryption");
-            
-            // Decrypt the packet
-            match encrypted_pkt.decrypt(&key) {
-                Ok(decrypted_pkt) => {
-                    info!("✓ Successfully decrypted packet!");
-                    trace!("Header: {:?}", decrypted_pkt.header);
-                    trace!("Decrypted payload: {:02X}", decrypted_pkt.payload[..decrypted_pkt.payload_len]);
-                    
-                    // Try to decode the packet into structured data
-                    match decrypted_pkt.decode() {
-                        Ok(decoded_pkt) => {
-                            // Publish the decoded packet to the channel
-                            PACKET_CHANNEL.publish_immediate(decoded_pkt.clone());
-                            
-                            // Try to get the owned data for logging
-                            match decoded_pkt.data() {
-                                Ok(owned_data) => {
-                                    trace!("Decoded packet data: {:?}", owned_data);
-                                    let portnum = owned_data.portnum;
-                                    
-                                    // Log the packet based on port type
-                                    let port_name = match portnum {
-                                        femtopb::EnumValue::Known(PortNum::TelemetryApp) => "TELEMETRY",
-                                        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO", 
-                                        femtopb::EnumValue::Known(PortNum::PositionApp) => "POSITION",
-                                        femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => "NEIGHBORINFO",
-                                        femtopb::EnumValue::Known(PortNum::TextMessageApp) => "TEXT",
-                                        femtopb::EnumValue::Known(PortNum::RoutingApp) => "ROUTING",
-                                        femtopb::EnumValue::Known(PortNum::TracerouteApp) => "TRACEROUTE",
-                                        _ => "OTHER",
-                                    };
 
-                                    // Do the logging while trying to get database info
-                                    if let Ok(db_guard) = NODE_DATABASE.try_lock() {
-                                        if let Some(db) = db_guard.as_ref() {
-                                            if let Some(source) = db.get_node(decoded_pkt.header.source) {
-                                                info!(
-                                                    "\n{} ({:?}) - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
-                                                    decoded_pkt.header, source, rssi, snr, port_name, owned_data.payload[..owned_data.payload_len]
-                                                );
-                                            } else {
-                                                info!(
-                                                    "\n{} - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
-                                                    decoded_pkt.header, rssi, snr, port_name, owned_data.payload[..owned_data.payload_len]
-                                                );
-                                            }
-                                        } else {
-                                            info!(
-                                                "\n{} - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
-                                                decoded_pkt.header, rssi, snr, port_name, owned_data.payload[..owned_data.payload_len]
-                                            );
-                                        }
-                                    } else {
-                                        info!(
-                                            "\n{} - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
-                                            decoded_pkt.header, rssi, snr, port_name, owned_data.payload[..owned_data.payload_len]
-                                        );
-                                    }
-                                }
-                                Err(_) => {
-                                    info!("Failed to get owned data from decoded packet");
-                                }
-                            }
-                        }                        Err(_) => {
-                            info!("Failed to decode packet to structured data");
-                        }
-                    }
-                }
-                Err(_) => {
-                    info!("✗ Failed to decrypt packet - this is the main issue!");
-                }
-            }
-        } else {
-            info!("Failed to create channel key");
-        }
+    // High Level overview of packet processing:
+    // Packet::<Encrypted>::from_bytes(buffer)  => Packet<Encrypted>
+    // .decrypt(&ChannelKey)                    => Packet<Decrypted>
+    // .decode()                                => Packet<Decoded>
+    // the decoded packet is equivalent to the `Data` protobuf message, but also has the header, rssi, and snr fields
+
+    // Create encrypted packet from received bytes
+    let Some(encrypted_pkt) = Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8) else {
+        warn!("✗ Failed to parse encrypted packet from bytes");
+        return;
+    };
+    trace!("✓ Successfully parsed encrypted packet");
+
+
+
+    // Decrypt the packet
+    let Ok(decrypted_pkt) = encrypted_pkt.decrypt(&key) else {
+        info!("✗ Failed to decrypt packet");
+        return;
+    };
+    info!("✓ Successfully decrypted packet!");
+    trace!("Header: {:?}", decrypted_pkt.header);
+    trace!("Decrypted payload: {:02X}", decrypted_pkt.payload[..decrypted_pkt.payload_len]);
+    
+    // Try to decode the packet into structured data
+    let Ok(decoded_pkt) = decrypted_pkt.decode() else {
+        info!("✗ Failed to decode packet to structured data");
+        return;
+    };
+    
+    // Publish the decoded packet to the channel
+    PACKET_CHANNEL.publish_immediate(decoded_pkt.clone());
+    
+    // Try to get the owned data for logging
+    let Ok(owned_data) = decoded_pkt.data() else {
+        info!("✗ Failed to get owned data from decoded packet");
+        return;
+    };
+    
+    trace!("Decoded packet data: {:?}", owned_data);
+    let portnum = owned_data.portnum;
+    
+    // Log the packet based on port type
+    let port_name = match portnum {
+        femtopb::EnumValue::Known(PortNum::TelemetryApp) => "TELEMETRY",
+        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO", 
+        femtopb::EnumValue::Known(PortNum::PositionApp) => "POSITION",
+        femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => "NEIGHBORINFO",
+        femtopb::EnumValue::Known(PortNum::TextMessageApp) => "TEXT",
+        femtopb::EnumValue::Known(PortNum::RoutingApp) => "ROUTING",
+        femtopb::EnumValue::Known(PortNum::TracerouteApp) => "TRACEROUTE",
+        _ => "OTHER",
+    };        
+    
+    // Log packet with optional node info from database
+    if let Ok(db_guard) = NODE_DATABASE.try_lock() {
+        let node_info = db_guard
+            .as_ref()
+            .and_then(|db| db.get_node(decoded_pkt.header.source));
+        
+        log_packet_info(&decoded_pkt.header, node_info, rssi, snr, port_name, &owned_data.payload[..owned_data.payload_len]);
     } else {
-        info!("Failed to parse encrypted packet from bytes");
+        log_packet_info(&decoded_pkt.header, None, rssi, snr, port_name, &owned_data.payload[..owned_data.payload_len]);
     }
 }
 

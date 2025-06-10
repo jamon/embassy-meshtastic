@@ -113,7 +113,8 @@ impl<S> Packet<S> {
     }
 }
 
-impl Packet<Encrypted> {    /// Create an encrypted packet from raw bytes
+impl Packet<Encrypted> {    
+    /// Create an encrypted packet from raw bytes
     /// The buffer should contain a 16-byte header followed by encrypted payload
     pub fn from_bytes(buffer: &[u8], rssi: i8, snr: i8) -> Option<Self> {
         #[cfg(feature = "defmt")]
