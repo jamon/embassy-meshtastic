@@ -8,9 +8,7 @@
 #[cfg(feature = "defmt")]
 use defmt::Format;
 
-use aes::Aes128;
-use aes::Aes256;
-
+use aes::{Aes128, Aes256};
 use ctr::{Ctr128BE, cipher::{KeyIvInit, StreamCipher}};
 
 type Aes128Ctr = Ctr128BE<Aes128>;
@@ -99,6 +97,65 @@ impl MeshKey {
             MeshKey::MeshKey8bit(key) | 
             MeshKey::MeshKey128bit(key) => key,
             MeshKey::MeshKey256bit(key) => key,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(Format))]
+pub enum ChannelKey {
+    /// AES-128 key
+    AES128([u8; 16]),
+    /// AES-256 key
+    AES256([u8; 32]),
+}
+
+impl ChannelKey {
+    /// Create a ChannelKey from raw bytes
+    pub fn from_bytes(key: &[u8], key_len: usize) -> Option<Self> {
+        match key_len {
+            0 => {
+                // Use default key for empty key
+                Some(ChannelKey::AES128(MESHTASTIC_DEFAULT_KEY))
+            }
+            1 => {
+                // Use default key with LSB replaced
+                let mut expanded_key = MESHTASTIC_DEFAULT_KEY;
+                expanded_key[15] = key[0];
+                Some(ChannelKey::AES128(expanded_key))
+            }
+            16 => {
+                let mut array = [0u8; 16];
+                array.copy_from_slice(key);
+                Some(ChannelKey::AES128(array))
+            }
+            32 => {
+                let mut array = [0u8; 32];
+                array.copy_from_slice(key);
+                Some(ChannelKey::AES256(array))
+            }
+            _ => None,
+        }
+    }
+
+    /// Transform data in place (both encrypt and decrypt use the same operation for CTR mode)
+    pub fn transform(&self, data: &mut [u8], iv: &[u8; 16]) -> Result<(), KeyError> {
+        if data.is_empty() {
+            return Err(KeyError::EmptyData);
+        }
+
+        match self {
+            ChannelKey::AES128(key) => {
+                // AES-CTR mode is symmetrical - same operation for encrypt and decrypt
+                let mut cipher = Ctr128BE::<Aes128>::new(key.into(), iv.into());
+                cipher.apply_keystream(data);
+                Ok(())
+            }
+            ChannelKey::AES256(key) => {
+                let mut cipher = Ctr128BE::<Aes256>::new(key.into(), iv.into());
+                cipher.apply_keystream(data);
+                Ok(())
+            }
         }
     }
 }

@@ -172,6 +172,16 @@ impl Header {
             relay_node,
         }
     }
+
+    /// Generate the IV for AES-CTR encryption/decryption
+    pub fn generate_iv(&self) -> [u8; 16] {
+        let mut iv = [0u8; 16];
+        // IV is composed of packet ID and source address
+        iv[0..4].copy_from_slice(&self.packet_id.to_le_bytes());
+        iv[4..8].copy_from_slice(&self.source.to_le_bytes());
+        // Remaining bytes stay zero
+        iv
+    }
 }
 
 impl HeaderFlags {
