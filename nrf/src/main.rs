@@ -362,12 +362,12 @@ fn handle_received_packet(
     info!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
 
     // High Level overview of packet processing:
-    // Packet::<Encrypted>::from_bytes(buffer)  => Packet<Encrypted>
-    // .decrypt(&ChannelKey)                    => Packet<Decrypted>
-    // .decode()                                => Packet<Decoded>
+    // 1. Packet::<Encrypted>::from_bytes(buffer)  => Packet<Encrypted>
+    // 2. .decrypt(&ChannelKey)                    => Packet<Decrypted>
+    // 3. .decode()                                => Packet<Decoded>
     // the decoded packet is equivalent to the `Data` protobuf message, but also has the header, rssi, and snr fields
 
-    // Create encrypted packet from received bytes
+    // 1. Create encrypted packet from received bytes
     let Some(encrypted_pkt) = Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8) else {
         warn!("✗ Failed to parse encrypted packet from bytes");
         return;
@@ -376,7 +376,7 @@ fn handle_received_packet(
 
 
 
-    // Decrypt the packet
+    // 2. Decrypt the packet
     let Ok(decrypted_pkt) = encrypted_pkt.decrypt(&key) else {
         info!("✗ Failed to decrypt packet");
         return;
@@ -385,11 +385,13 @@ fn handle_received_packet(
     trace!("Header: {:?}", decrypted_pkt.header);
     trace!("Decrypted payload: {:02X}", decrypted_pkt.payload[..decrypted_pkt.payload_len]);
     
-    // Try to decode the packet into structured data
+    // 3. Try to decode the packet into structured data
     let Ok(decoded_pkt) = decrypted_pkt.decode() else {
         info!("✗ Failed to decode packet to structured data");
         return;
     };
+    trace!("✓ Successfully decoded packet to structured data");
+
     
     // Publish the decoded packet to the channel
     PACKET_CHANNEL.publish_immediate(decoded_pkt.clone());
