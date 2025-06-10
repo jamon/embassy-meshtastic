@@ -359,7 +359,7 @@ fn handle_received_packet(
 
     info!("=== Processing received packet ===");
     info!("Received {} bytes, SNR: {}, RSSI: {}", received_len, snr, rssi);
-    info!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
+    trace!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
 
     // High Level overview of packet processing:
     // 1. Packet::<Encrypted>::from_bytes(buffer)  => Packet<Encrypted>

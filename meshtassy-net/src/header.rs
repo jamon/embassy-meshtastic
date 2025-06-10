@@ -90,7 +90,7 @@ impl Header {    /// Parse a 16-byte header from a byte slice
     /// Returns None if the slice is not exactly 16 bytes
     pub fn from_bytes(header_bytes: &[u8]) -> Option<Self> {
         #[cfg(feature = "defmt")]
-        defmt::info!("Parsing header from {} bytes", header_bytes.len());
+        defmt::trace!("Parsing header from {} bytes", header_bytes.len());
         
         if header_bytes.len() != 16 {
             #[cfg(feature = "defmt")]
@@ -105,19 +105,6 @@ impl Header {    /// Parse a 16-byte header from a byte slice
         let channel_hash = header_bytes[13];
         let next_hop = header_bytes[14];
         let relay_node = header_bytes[15];
-
-        #[cfg(feature = "defmt")]
-        {
-            defmt::info!("Parsed header fields:");
-            defmt::info!("  destination: 0x{:08X}", destination);
-            defmt::info!("  source: 0x{:08X}", source);
-            defmt::info!("  packet_id: 0x{:08X}", packet_id);
-            defmt::info!("  flags: hop_limit={}, hop_start={}, want_ack={}, via_mqtt={}", 
-                        flags.hop_limit, flags.hop_start, flags.want_ack, flags.via_mqtt);
-            defmt::info!("  channel_hash: 0x{:02X}", channel_hash);
-            defmt::info!("  next_hop: 0x{:02X}", next_hop);
-            defmt::info!("  relay_node: 0x{:02X}", relay_node);
-        }
 
         Some(Header {
             destination,

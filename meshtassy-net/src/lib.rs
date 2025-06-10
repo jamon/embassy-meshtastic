@@ -60,17 +60,6 @@ impl OwnedData {
         #[cfg(feature = "defmt")]
         defmt::trace!("Converting protobuf Data to OwnedData");
 
-        
-        #[cfg(feature = "defmt")]
-        {
-            defmt::info!("  payload length: {}", data.payload.len());
-            defmt::info!("  payload {:02X}", &data.payload);
-            defmt::info!("  portnum: {:?}", data.portnum);
-            defmt::info!("  want_response: {}", data.want_response);
-            defmt::info!("  dest: 0x{:08X}", data.dest);
-            defmt::info!("  source: 0x{:08X}", data.source);
-        }
-
         let mut new_payload = [0u8; 240];
         let copy_len = data.payload.len().min(240);
         new_payload[..copy_len].copy_from_slice(&data.payload[..copy_len]);
@@ -150,7 +139,7 @@ impl Packet<Encrypted> {
     /// The buffer should contain a 16-byte header followed by encrypted payload
     pub fn from_bytes(buffer: &[u8], rssi: i8, snr: i8) -> Option<Self> {
         #[cfg(feature = "defmt")]
-        defmt::info!("Creating encrypted packet from {} bytes (RSSI: {}, SNR: {})", buffer.len(), rssi, snr);
+        defmt::trace!("Creating encrypted packet from {} bytes (RSSI: {}, SNR: {})", buffer.len(), rssi, snr);
         
         if buffer.len() < 16 {
             #[cfg(feature = "defmt")]
@@ -159,28 +148,19 @@ impl Packet<Encrypted> {
         }
 
         #[cfg(feature = "defmt")]
-        defmt::info!("Raw header bytes: {:02X}", &buffer[..16]);
+        defmt::trace!("Raw header bytes: {:02X}", &buffer[..16]);
 
         let header = Header::from_bytes(&buffer[..16])?;
         
         #[cfg(feature = "defmt")]
-        defmt::info!("Parsed header: {}", header);
+        defmt::trace!("Parsed header: {}", header);
         
         let mut payload = [0u8; 240];
         let payload_len = (buffer.len() - 16).min(240);
         payload[..payload_len].copy_from_slice(&buffer[16..16 + payload_len]);
 
         #[cfg(feature = "defmt")]
-        {
-            defmt::info!("Payload length: {} bytes", payload_len);
-            if payload_len > 0 {
-                defmt::info!("Encrypted payload: {:02X}", 
-                            &payload[..payload_len]);
-            }
-            if payload_len != buffer.len() - 16 {
-                defmt::warn!("Payload truncated from {} to {} bytes", buffer.len() - 16, payload_len);
-            }
-        }
+        defmt::trace!("Payload: {} bytes, encrypted: {:02X}", payload_len, &payload[..payload_len]);
 
         Some(Self {
             header,
@@ -197,24 +177,18 @@ impl Packet<Encrypted> {
     /// Consumes the original encrypted packet
     pub fn decrypt(self, key: &ChannelKey) -> Result<Packet<Decrypted>, ()> {
         #[cfg(feature = "defmt")]
-        {
-            defmt::info!("Starting decryption process");
-            defmt::info!("Header: {:?}", self.header);
-            defmt::info!("Encrypted payload length: {}", self.payload_len);
-            defmt::info!("Encrypted payload: {:02X}", &self.payload);
-        }
+        defmt::trace!(
+            "Starting decryption process - Header: {:?}, Encrypted payload length: {}, Encrypted payload: {:02X}",
+            self.header,
+            self.payload_len,
+            &self.payload[..self.payload_len]
+        );
 
         // Create IV from header using the correct Meshtastic protocol format
         let iv = self.header.create_iv();
         
         #[cfg(feature = "defmt")]
-        {
-            defmt::info!("Generated IV: {:02X}", iv);
-            match key {
-                ChannelKey::AES128(k) => defmt::info!("Using AES128 key: {:02X}", k),
-                ChannelKey::AES256(k) => defmt::info!("Using AES256 key: {:02X}", &k[..16]),
-            }
-        }
+        defmt::trace!("Generated IV: {:02X}, Using {:?}", iv, key);
 
         // Copy payload for decryption
         let mut decrypted_payload = [0u8; 240];
@@ -224,9 +198,7 @@ impl Packet<Encrypted> {
         match key.transform(&mut decrypted_payload[..self.payload_len], &iv) {
             Ok(()) => {
                 #[cfg(feature = "defmt")]
-                {
-                    defmt::trace!("Decrypted payload: {:02X}", decrypted_payload[..self.payload_len]);
-                }
+                defmt::trace!("Decrypted payload: {:02X}", decrypted_payload[..self.payload_len]);
                 
                 Ok(Packet {
                     header: self.header,
@@ -249,7 +221,7 @@ impl Packet<Decrypted> {
     /// Decode the payload into structured data
     pub fn decode(self) -> Result<DecodedPacket, ()> {
         #[cfg(feature = "defmt")]
-        defmt::info!("Starting packet decode process");
+        defmt::trace!("Starting packet decode process");
         
         if self.payload_len == 0 {
             #[cfg(feature = "defmt")]
@@ -258,15 +230,11 @@ impl Packet<Decrypted> {
         }
 
         #[cfg(feature = "defmt")]
-        defmt::info!("Payload length: {}, first 8 bytes: {:02X}", 
-                    self.payload_len, 
-                    &self.payload[..self.payload_len]);
-
-        #[cfg(feature = "defmt")]
-        {
-            defmt::info!("Attempting to decode protobuf Data from {} bytes", self.payload_len);
-            defmt::info!("Payload data: {:02X}", &self.payload[..self.payload_len]);
-        }
+        defmt::trace!(
+            "Attempting to decode protobuf Data from {} bytes, full payload: {:02X}",
+            self.payload_len,
+            &self.payload[..self.payload_len]
+        );
         let Ok(data) = meshtastic_protobufs::meshtastic::Data::decode(&self.payload[..self.payload_len]) else {
             #[cfg(feature = "defmt")]
             {
@@ -278,18 +246,17 @@ impl Packet<Decrypted> {
         
         #[cfg(feature = "defmt")]
         {
-            defmt::info!("Successfully decoded protobuf Data");
-            defmt::info!("  portnum: {:?}", data.portnum);
-            defmt::info!("  payload length: {}", data.payload.len());
-            defmt::info!("  want_response: {}", data.want_response);
-            defmt::info!("  dest: 0x{:08X}", data.dest);
-            defmt::info!("  source: 0x{:08X}", data.source);
-            defmt::info!("  request_id: {}", data.request_id);
-            defmt::info!("  reply_id: {}", data.reply_id);
-            if data.payload.len() > 0 {
-                defmt::info!("  payload first 8 bytes: {:02X}", 
-                            &data.payload[..data.payload.len().min(8)]);
-            }
+            defmt::trace!(
+                "Successfully decoded protobuf Data - portnum: {:?}, payload length: {}, want_response: {}, dest: 0x{:08X}, source: 0x{:08X}, request_id: {}, reply_id: {}, payload: {:02X}",
+                data.portnum,
+                data.payload.len(),
+                data.want_response,
+                data.dest,
+                data.source,
+                data.request_id,
+                data.reply_id,
+                if data.payload.len() > 0 { &data.payload[..data.payload.len().min(8)] } else { &[] }
+            );
         }
         
         // Convert protobuf data to owned data

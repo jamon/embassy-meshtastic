@@ -113,18 +113,18 @@ pub enum ChannelKey {
 impl ChannelKey {    /// Create a ChannelKey from raw bytes
     pub fn from_bytes(key: &[u8], key_len: usize) -> Option<Self> {
         #[cfg(feature = "defmt")]
-        defmt::info!("Creating ChannelKey from {} bytes (effective length: {})", key.len(), key_len);
+        defmt::trace!("Creating ChannelKey from {} bytes (effective length: {})", key.len(), key_len);
         
         let result = match key_len {
             0 => {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Using default key for empty key");
+                defmt::trace!("Using default key for empty key");
                 // Use default key for empty key
                 Some(ChannelKey::AES128(MESHTASTIC_DEFAULT_KEY))
             }
             1 => {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Using default key with LSB replaced by 0x{:02X}", key[0]);
+                defmt::trace!("Using default key with LSB replaced by 0x{:02X}", key[0]);
                 // Use default key with LSB replaced
                 let mut expanded_key = MESHTASTIC_DEFAULT_KEY;
                 expanded_key[15] = key[0];
@@ -132,14 +132,14 @@ impl ChannelKey {    /// Create a ChannelKey from raw bytes
             }
             16 => {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Using 16-byte AES-128 key: {:02X}", &key[..16]);
+                defmt::trace!("Using 16-byte AES-128 key: {:02X}", &key[..16]);
                 let mut array = [0u8; 16];
                 array.copy_from_slice(key);
                 Some(ChannelKey::AES128(array))
             }
             32 => {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Using 32-byte AES-256 key: {:02X}", &key[..16]); // Only show first 16 bytes
+                defmt::trace!("Using 32-byte AES-256 key: {:02X}", &key[..16]); // Only show first 16 bytes
                 let mut array = [0u8; 32];
                 array.copy_from_slice(key);
                 Some(ChannelKey::AES256(array))
@@ -154,8 +154,8 @@ impl ChannelKey {    /// Create a ChannelKey from raw bytes
         #[cfg(feature = "defmt")]
         {
             match &result {
-                Some(ChannelKey::AES128(_)) => defmt::info!("Created AES-128 ChannelKey"),
-                Some(ChannelKey::AES256(_)) => defmt::info!("Created AES-256 ChannelKey"),
+                Some(ChannelKey::AES128(_)) => defmt::trace!("Created AES-128 ChannelKey"),
+                Some(ChannelKey::AES256(_)) => defmt::trace!("Created AES-256 ChannelKey"),
                 None => defmt::error!("Failed to create ChannelKey"),
             }
         }
