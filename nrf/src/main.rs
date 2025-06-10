@@ -323,19 +323,18 @@ fn log_packet_info(
     rssi: i16, 
     snr: i16, 
     port_name: &str, 
-    payload: &[u8]
 ) {
     match node_info {
         Some(source) => {
             info!(
-                "\n{} ({:?}) - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
-                header, source, rssi, snr, port_name, payload
+                "\n{} ({:?}) - RSSI: {}, SNR: {} - {}",
+                header, source, rssi, snr, port_name
             );
         }
         None => {
             info!(
-                "\n{} - RSSI: {}, SNR: {} - {}\n    Payload: {:02X}",
-                header, rssi, snr, port_name, payload
+                "\n{} - RSSI: {}, SNR: {} - {}",
+                header, rssi, snr, port_name
             );
         }
     }
@@ -379,7 +378,7 @@ fn handle_received_packet(
         info!("✗ Failed to decrypt packet");
         return;
     };
-    info!("✓ Successfully decrypted packet: {:?}", decrypted_pkt);
+    trace!("✓ Successfully decrypted packet: {:?}", decrypted_pkt);
 
     // 3. Try to decode the packet into structured data
     let Ok(decoded_pkt) = decrypted_pkt.decode() else {
@@ -418,10 +417,10 @@ fn handle_received_packet(
         let node_info = db_guard
             .as_ref()
             .and_then(|db| db.get_node(decoded_pkt.header.source));
-        
-        log_packet_info(&decoded_pkt.header, node_info, rssi, snr, port_name, &owned_data.payload[..owned_data.payload_len]);
+
+        log_packet_info(&decoded_pkt.header, node_info, rssi, snr, port_name);
     } else {
-        log_packet_info(&decoded_pkt.header, None, rssi, snr, port_name, &owned_data.payload[..owned_data.payload_len]);
+        log_packet_info(&decoded_pkt.header, None, rssi, snr, port_name);
     }
 }
 
