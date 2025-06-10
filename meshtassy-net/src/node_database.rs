@@ -326,7 +326,10 @@ impl NodeDatabase {
 
     /// Add or update a node from a received packet
     /// This method handles the packet decoding and node database update
-    pub fn add_or_update_node_from_packet(&mut self, packet: &crate::Packet) -> bool {
+    pub fn add_or_update_node_from_packet(
+        &mut self,
+        packet: &crate::Packet<crate::Decrypted>,
+    ) -> bool {
         let node_num = packet.header.source;
 
         match packet.port_num {

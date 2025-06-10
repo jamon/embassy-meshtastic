@@ -27,16 +27,16 @@ use embassy_nrf::usb::{Driver, Instance};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 
-use meshtassy_net::header::MeshtasticHeaderFlags;
+use meshtassy_net::header::HeaderFlags;
 use meshtassy_net::{
-    decrypt_meshtastic_packet, encrypt_meshtastic_packet, DecodedPacket, MeshtasticHeader, Packet,
+    decrypt_packet, encrypt_packet, DecodedPacket, Decrypted, Encrypted, Header, Packet,
 };
 use meshtastic_protobufs::meshtastic::{
     Data, NeighborInfo, PortNum, Position, RouteDiscovery, Routing, Telemetry, User,
 };
 
-static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet, 8, 8, 1> =
-    PubSubChannel::<CriticalSectionRawMutex, Packet, 8, 8, 1>::new();
+static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet<Decrypted>, 8, 8, 1> =
+    PubSubChannel::<CriticalSectionRawMutex, Packet<Decrypted>, 8, 8, 1>::new();
 
 static NODE_DATABASE: Mutex<
     CriticalSectionRawMutex,
@@ -228,11 +228,11 @@ async fn main(spawner: Spawner) {
     let mut bytes = [0u8; 4];
     rng.blocking_fill_bytes(&mut bytes);
     let tx_packet_id = u32::from_le_bytes(bytes); // Create the transmission header
-    let tx_header = MeshtasticHeader {
+    let tx_header = Header {
         source: 0xDEADBEEF,
         destination: 0xFFFFFFFF,
         packet_id: tx_packet_id,
-        flags: MeshtasticHeaderFlags {
+        flags: HeaderFlags {
             hop_limit: 7,
             hop_start: 7,
             want_ack: false,
@@ -258,9 +258,9 @@ async fn main(spawner: Spawner) {
             &tx_buffer,
             packet_len,
             &mut decrypted_buffer,
-            &tx_header,
-            -50, // Mock RSSI value
-            10,  // Mock SNR value
+            // &tx_header,
+            // -50, // Mock RSSI value
+            // 10,  // Mock SNR value
         );
 
         // match lora
@@ -308,15 +308,15 @@ async fn main(spawner: Spawner) {
                 trace!("Received packet: {:02X}", &receiving_buffer[..received_len]);
 
                 // decode header
-                let header = MeshtasticHeader::from_bytes(&receiving_buffer[..16]).unwrap();
+                let header = Header::from_bytes(&receiving_buffer[..16]).unwrap();
 
                 handle_received_packet(
                     &receiving_buffer,
                     received_len,
                     &mut decrypted_buffer,
-                    &header,
-                    rx_pkt_status.rssi,
-                    rx_pkt_status.snr,
+                    // &header,
+                    // rx_pkt_status.rssi,
+                    // rx_pkt_status.snr,
                 );
             }
             Err(err) => info!("rx unsuccessful = {}", err),
@@ -328,11 +328,10 @@ fn handle_received_packet(
     receiving_buffer: &[u8],
     received_len: usize,
     decrypted_buffer: &mut [u8],
-    header: &MeshtasticHeader,
-    rssi: i16,
-    snr: i16,
 ) {
-    match decrypt_meshtastic_packet(
+    let pkt = Packet::from_bytes(&receiving_buffer[..received_len]);
+
+    match decrypt_packet(
         &receiving_buffer[..received_len],
         received_len,
         decrypted_buffer,
@@ -351,14 +350,141 @@ fn handle_received_packet(
                     trace!("Decoded packet {:?} ", mp);
                     let portnum = mp.portnum;
                     // publish the packet to the channel - probably need to handle when decryption fails better
-                    let mut packet = Packet {
-                        header: header.clone(),
-                        port_num: portnum,
+                    let mut packet = Packet::<Decrypted>::new(
+                        header.clone(),
+                        portnum,
                         rssi,
                         snr,
-                        payload: [0; 240],
-                        payload_len: mp.payload.len(),
+                        [0; 240],
+                        mp.payload.len(),
+                    );
+                    packet.payload[..mp.payload.len()].copy_from_slice(&mp.payload);
+                    PACKET_CHANNEL.publish_immediate(packet);
+
+                    // Decode into our enum
+                    let decoded_packet = match portnum {
+                        femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
+                            match Telemetry::decode(&mp.payload) {
+                                Ok(telemetry) => DecodedPacket::Telemetry(telemetry),
+                                Err(_) => DecodedPacket::TelemetryDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
+                            match User::decode(&mp.payload) {
+                                Ok(user_info) => DecodedPacket::NodeInfo(user_info),
+                                Err(_) => DecodedPacket::NodeInfoDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::PositionApp) => {
+                            match Position::decode(&mp.payload) {
+                                Ok(position) => DecodedPacket::Position(position),
+                                Err(_) => DecodedPacket::PositionDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => {
+                            match NeighborInfo::decode(&mp.payload) {
+                                Ok(neighbor_info) => DecodedPacket::NeighborInfo(neighbor_info),
+                                Err(_) => DecodedPacket::NeighborInfoDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::TextMessageApp) => {
+                            match core::str::from_utf8(&mp.payload) {
+                                Ok(text_message) => DecodedPacket::TextMessage(text_message),
+                                Err(_) => DecodedPacket::TextMessageDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::RoutingApp) => {
+                            match Routing::decode(&mp.payload) {
+                                Ok(routing) => DecodedPacket::Routing(routing),
+                                Err(_) => DecodedPacket::RoutingDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Known(PortNum::TracerouteApp) => {
+                            match RouteDiscovery::decode(&mp.payload) {
+                                Ok(route_discovery) => {
+                                    DecodedPacket::RouteDiscovery(route_discovery)
+                                }
+                                Err(_) => DecodedPacket::RouteDiscoveryDecodeError,
+                            }
+                        }
+                        femtopb::EnumValue::Unknown(_) => DecodedPacket::Unknown(portnum),
+                        _ => DecodedPacket::Other(portnum),
                     };
+
+                    // Helper function to do logging while holding the database lock
+                    let log_packet =
+                        |source_opt: Option<&meshtassy_net::node_database::NodeInfo>| {
+                            if let Some(source) = source_opt {
+                                info!(
+                                    "\n{} ({:?}) - RSSI: {}, SNR: {}\n    {:?}",
+                                    header, source, rssi, snr, decoded_packet
+                                );
+                            } else {
+                                info!(
+                                    "\n{} - RSSI: {}, SNR: {}\n    {:?}",
+                                    header, rssi, snr, decoded_packet
+                                );
+                            }
+                        };
+
+                    // Do the logging while holding the database lock to avoid cloning
+                    if let Ok(db_guard) = NODE_DATABASE.try_lock() {
+                        if let Some(db) = db_guard.as_ref() {
+                            log_packet(db.get_node(header.source));
+                        } else {
+                            log_packet(None);
+                        }
+                    } else {
+                        // If we can't get the lock, just log without source info
+                        log_packet(None);
+                    }
+                }
+                Err(err) => {
+                    info!("Failed to decode protobuf: {:?}", err);
+                }
+            }
+        }
+        None => {
+            info!("Failed to decrypt packet");
+        }
+    }
+}
+
+fn handle_received_packet_old(
+    receiving_buffer: &[u8],
+    received_len: usize,
+    decrypted_buffer: &mut [u8],
+    header: &Header,
+    rssi: i16,
+    snr: i16,
+) {
+    match decrypt_packet(
+        &receiving_buffer[..received_len],
+        received_len,
+        decrypted_buffer,
+        &[0x01; 1],
+        1, // Use 16-byte key length for AES-128
+    ) {
+        Some(payload_len) => {
+            trace!("Header: {:02X}", &receiving_buffer[..16]);
+            trace!(
+                "Decrypted payload: {:02X}",
+                &decrypted_buffer[..payload_len]
+            );
+            // Try to decode the protobuf message
+            match Data::decode(&decrypted_buffer[..payload_len]) {
+                Ok(mp) => {
+                    trace!("Decoded packet {:?} ", mp);
+                    let portnum = mp.portnum;
+                    // publish the packet to the channel - probably need to handle when decryption fails better
+                    let mut packet = Packet::<Decrypted>::new(
+                        header.clone(),
+                        portnum,
+                        rssi,
+                        snr,
+                        [0; 240],
+                        mp.payload.len(),
+                    );
                     packet.payload[..mp.payload.len()].copy_from_slice(&mp.payload);
                     PACKET_CHANNEL.publish_immediate(packet);
 
@@ -454,7 +580,7 @@ fn handle_received_packet(
 // temporary function just to test sending text messages
 // This will be replaced with a proper Meshtastic API call in the future
 fn create_text_message_packet(
-    header: &MeshtasticHeader,
+    header: &Header,
     message: &str,
     key: &[u8],
     key_len: usize,
@@ -492,7 +618,7 @@ fn create_text_message_packet(
     );
 
     // Encrypt the packet
-    let encrypted_packet_len = encrypt_meshtastic_packet(
+    let encrypted_packet_len = encrypt_packet(
         header,
         &payload_buffer[..encoded_payload_len],
         tx_buffer,
@@ -516,7 +642,10 @@ fn create_text_message_packet(
     }
 }
 
-fn format_packet_for_serial<'a>(packet: &Packet, buffer: &'a mut [u8]) -> Option<&'a [u8]> {
+fn format_packet_for_serial<'a>(
+    packet: &Packet<Decrypted>,
+    buffer: &'a mut [u8],
+) -> Option<&'a [u8]> {
     let mut pos = 0;
 
     // Helper function to append string to buffer

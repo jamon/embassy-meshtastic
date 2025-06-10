@@ -3,6 +3,7 @@
 use base64::engine::general_purpose;
 use base64::Engine;
 use core::prelude::v1::*;
+use femtopb::Message as _;
 use key::{MeshKey, MeshKeyTrait};
 
 #[cfg(feature = "defmt")]
@@ -17,28 +18,198 @@ pub use meshtastic_protobufs::meshtastic::{
 // Channel hash generation utilities
 pub mod channel;
 
-// Meshtastic packet header utilities
+// packet header types
 pub mod header;
-pub use header::MeshtasticHeader;
+pub use header::Header;
 
-// Meshtastic key management utilities
+// key management
 pub mod key;
 
 // Node database for storing device information
 pub mod node_database;
 
-/// Represents a received or transmitted Meshtastic packet
+/// Marker types to distinguish between encrypted and decrypted packet states
+#[derive(Clone)]
+pub struct Encrypted;
+
+#[derive(Clone)]
+pub struct Decrypted;
+
+#[derive(Clone)]
+pub struct Decoded;
+
+/// A generic packet that can be either encrypted or decrypted
 #[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(Format))]
-pub struct Packet {
-    pub header: MeshtasticHeader,
-    pub port_num: femtopb::EnumValue<PortNum>,
+pub struct Packet<T> {
+    pub header: Header,
     pub rssi: i16,
     pub snr: i16,
     pub payload: [u8; 240],
     pub payload_len: usize,
+    _marker: core::marker::PhantomData<T>,
 }
 
+impl<T> Packet<T> {
+    /// Create a new packet with the given data
+    pub fn new(
+        header: Header,
+        rssi: i16,
+        snr: i16,
+        payload: [u8; 240],
+        payload_len: usize,
+    ) -> Self {
+        Self {
+            header,
+            rssi,
+            snr,
+            payload,
+            payload_len,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
+impl Packet<Encrypted> {
+    /// Create an encrypted packet from raw bytes
+    /// The buffer should contain a 16-byte header followed by encrypted payload
+    pub fn from_bytes(packet_buffer: &[u8], rssi: i16, snr: i16) -> Option<Self> {
+        // Validate minimum packet size (16-byte header)
+        if packet_buffer.len() < 16 {
+            return None;
+        }
+
+        // Parse the header from the first 16 bytes
+        let header = Header::from_bytes(&packet_buffer[..16])?;
+
+        // Calculate payload length
+        let payload_len = packet_buffer.len() - 16;
+        if payload_len > 240 {
+            return None;
+        }
+
+        // Copy the encrypted payload
+        let mut payload = [0u8; 240];
+        payload[..payload_len].copy_from_slice(&packet_buffer[16..]);
+
+        Some(Self::new(header, rssi, snr, payload, payload_len))
+    }
+
+    /// Decrypts the packet payload using the provided key
+    /// Returns a DecryptedPacket on success, or None if decryption fails
+    /// Consumes the original encrypted packet
+    pub fn decrypt(self, key: &[u8], key_len: usize) -> Option<Packet<Decrypted>> {
+        // Validate key buffer has enough bytes for specified length
+        if key.len() < key_len {
+            return None;
+        }
+
+        // Create a buffer for the decrypted payload
+        let mut decrypted_payload = [0u8; 240];
+
+        // Copy the encrypted payload to the decryption buffer
+        decrypted_payload[..self.payload_len].copy_from_slice(&self.payload[..self.payload_len]);
+
+        // Build the 16-byte IV/nonce according to Meshtastic protocol:
+        // Bytes 0-7: packet_id (native byte order u64)
+        // Bytes 8-11: from_node (native byte order u32)
+        // Bytes 12-15: extraNonce (always zero in current protocol)
+        let iv = self.header.create_iv();
+
+        // Handle different key sizes using the new MeshtasticKey system
+        match MeshKey::new(&key[..key_len]) {
+            Ok(k) => {
+                // Use the new key's AES-CTR transform method
+                match k.transform(&mut decrypted_payload[..self.payload_len], iv) {
+                    Ok(_) => {
+                        // Create and return the decrypted packet
+                        Some(Packet::<Decrypted>::new(
+                            self.header,
+                            self.rssi,
+                            self.snr,
+                            decrypted_payload,
+                            self.payload_len,
+                        ))
+                    }
+                    Err(_) => None,
+                }
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+impl Packet<Decrypted> {
+    pub fn decode(self) -> Option<Packet<Decoded>> {
+        match meshtastic_protobufs::meshtastic::Data::decode(
+            &self.payload[16..self.payload_len - 16],
+        ) {
+            Ok(mp) => {
+                #[cfg(feature = "defmt")]
+                defmt::trace!("Decoded packet {:?} ", mp);
+                Some(Packet::<Decoded>::new(
+                    self.header,
+                    self.rssi,
+                    self.snr,
+                    self.payload,
+                    self.payload_len,
+                ))
+            }
+            Err(err) => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Failed to decode protobuf: {:?}", err);
+                None
+            }
+        }
+    }
+    /// Encrypts the decrypted packet back to an encrypted packet
+    /// Returns an encrypted Packet on success, or None if encryption fails
+    pub fn encrypt(&self, key: &[u8], key_len: usize) -> Option<Packet<Encrypted>> {
+        let mut encrypted_buffer = [0u8; 256];
+
+        match encrypt_packet(
+            &self.header,
+            &self.payload[..self.payload_len],
+            &mut encrypted_buffer,
+            key,
+            key_len,
+        ) {
+            Some(packet_len) => {
+                let encrypted_payload_len = packet_len - 16;
+                let mut encrypted_packet = Packet::<Encrypted>::new(
+                    self.header.clone(),
+                    self.rssi,
+                    self.snr,
+                    [0u8; 240],
+                    encrypted_payload_len,
+                );
+                encrypted_packet.payload[..encrypted_payload_len]
+                    .copy_from_slice(&encrypted_buffer[16..packet_len]);
+                Some(encrypted_packet)
+            }
+            None => None,
+        }
+    }
+}
+
+impl Packet<Decoded> {
+    /// Create a decoded packet from a decoded Meshtastic protobuf message
+    pub fn from_decoded(
+        header: Header,
+        rssi: i16,
+        snr: i16,
+        payload: [u8; 240],
+        payload_len: usize,
+    ) -> Self {
+        Self {
+            header,
+            rssi,
+            snr,
+            payload,
+            payload_len,
+            _marker: core::marker::PhantomData,
+        }
+    }
+}
 /// Represents a decoded Meshtastic packet with its specific payload type
 #[derive(Clone)]
 #[cfg_attr(feature = "defmt", derive(Format))]
@@ -102,7 +273,7 @@ pub fn parse_key(base64_key: &str) -> Result<[u8; 32], CryptoError> {
 /// - 1 byte: Uses default key with LSB replaced by the provided byte (AES-128)
 /// - 16 bytes: Uses AES-128 with the provided key
 /// - 32 bytes: Uses AES-256 with the provided key
-pub fn decrypt_meshtastic_packet(
+pub fn decrypt_packet(
     packet_buffer: &[u8],
     packet_len: usize,
     output_buffer: &mut [u8],
@@ -128,7 +299,7 @@ pub fn decrypt_meshtastic_packet(
     let (header_bytes, encrypted_payload) = packet_buffer.split_at(16);
 
     // Parse the header
-    let header = MeshtasticHeader::from_bytes(header_bytes)?;
+    let header = Header::from_bytes(header_bytes)?;
 
     // Copy encrypted payload to output buffer
     output_buffer[..payload_len].copy_from_slice(&encrypted_payload[..payload_len]);
@@ -166,8 +337,8 @@ pub fn channel_hash(channel_name: &str) -> u32 {
 
 /// Encrypt a payload and create a complete Meshtastic packet
 /// Returns the total packet length on success, or None if buffers are insufficient
-pub fn encrypt_meshtastic_packet(
-    header: &MeshtasticHeader,
+pub fn encrypt_packet(
+    header: &Header,
     payload: &[u8],
     output_buffer: &mut [u8],
     key: &[u8],

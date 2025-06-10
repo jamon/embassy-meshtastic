@@ -1,10 +1,10 @@
-# Embassy Meshtastic
+# Meshtassy
 
-A Rust/Embassy implementation of Meshtastic firmware for embedded devices.
+Meshtassy is a mesh network that aims to be compatible with the Meshtastic network.
 
 ## Overview
 
-This project is a proof-of-concept implementation of the [Meshtastic](https://meshtastic.org/) mesh networking protocol using [Embassy](https://embassy.dev/), an async runtime for embedded Rust. It provides a foundation for running Meshtastic on microcontrollers with full async capabilities and memory safety guarantees.
+This project is a proof-of-concept implementation of a mesh network firmware using [Embassy](https://embassy.dev/) and [lora-rs](https://github.com/lora-rs/lora-rs).  It aims to be compatible with the Meshtastic network.
 
 **⚠️ This is currently a proof-of-concept and significant reorganization is likely in the future.**
 
@@ -34,6 +34,7 @@ The modular design of embassy-rs makes it relatively easy to port to other board
 - [ ] Node database
   - [x] RAM Node database 
   - [ ] Persistence to Flash
+  - [ ] Ability to specify nodedb size
 - [ ] Channel database (support encrypting/decrypting other channels)
 - [ ] Private messages (PKI encryption)
 - [ ] Support for other Embassy-supported hardware (RP2040, ESP32 primarily, possibly others)
@@ -55,11 +56,11 @@ The project is organized into several crates:
 ### `nrf/`
 Main embedded application targeting the nRF52840. Contains the Embassy-based async runtime and LoRa radio management.
 
-### `meshtastic-crypto/`
-Encryption/decryption library for Meshtastic packets.
+### `meshtassy-net/`
+Mesh network capabilities/integration.
 
 **Features:**
-- AES-CTR encryption compatible with Meshtastic protocol
+- AES-CTR encryption compatible with Meshtastic network
 - Header parsing and IV generation
 - Support for variable key lengths (128/256bit, supporting meshtastic's default key and 1-byte keys, and 128/256bit keys)
 - `no_std` compatible with optional `defmt` logging
@@ -68,9 +69,9 @@ Encryption/decryption library for Meshtastic packets.
 Protobuf definitions and generated Rust code for Meshtastic messages.
 
 **Features:**
-- Generated from official Meshtastic .proto files
+- Generated from Meshtastic .proto files via git submodule
 - Uses `femtopb` for `no_std` protobuf support and supports `defmt`
-- Includes all major Meshtastic message types
+
 
 ### `packet_creation_test/`
 Standalone test utility for validating packet creation and encryption without embedded hardware.
@@ -151,3 +152,7 @@ This project is licensed under the GPL V3 - see [LICENSE](LICENSE) for details.
 - [lora-rs](https://github.com/lora-rs/lora-rs) - LoRa PHY implementation
 - [femtopb](https://github.com/cberner/femtopb) - No-std protobuf implementation
 - [gatlinnewhouse's rust firmware work](https://github.com/gatlinnewhouse/meshtastic-rust-firmware) - for the idea to use femptopb and random other ideas
+
+**Note:**
+*Meshtastic is a registered trademark of Meshtastic LLC.*
+*Meshtassy is not endorsed by or affiliated with Meshtastic/Meshtastic LLC.*
