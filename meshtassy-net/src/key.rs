@@ -110,52 +110,105 @@ pub enum ChannelKey {
     AES256([u8; 32]),
 }
 
-impl ChannelKey {
-    /// Create a ChannelKey from raw bytes
+impl ChannelKey {    /// Create a ChannelKey from raw bytes
     pub fn from_bytes(key: &[u8], key_len: usize) -> Option<Self> {
-        match key_len {
+        #[cfg(feature = "defmt")]
+        defmt::info!("Creating ChannelKey from {} bytes (effective length: {})", key.len(), key_len);
+        
+        let result = match key_len {
             0 => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Using default key for empty key");
                 // Use default key for empty key
                 Some(ChannelKey::AES128(MESHTASTIC_DEFAULT_KEY))
             }
             1 => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Using default key with LSB replaced by 0x{:02X}", key[0]);
                 // Use default key with LSB replaced
                 let mut expanded_key = MESHTASTIC_DEFAULT_KEY;
                 expanded_key[15] = key[0];
                 Some(ChannelKey::AES128(expanded_key))
             }
             16 => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Using 16-byte AES-128 key: {:02X}", &key[..16]);
                 let mut array = [0u8; 16];
                 array.copy_from_slice(key);
                 Some(ChannelKey::AES128(array))
             }
             32 => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Using 32-byte AES-256 key: {:02X}", &key[..16]); // Only show first 16 bytes
                 let mut array = [0u8; 32];
                 array.copy_from_slice(key);
                 Some(ChannelKey::AES256(array))
             }
-            _ => None,
-        }
-    }
+            _ => {
+                #[cfg(feature = "defmt")]
+                defmt::error!("Invalid key length: {}", key_len);
+                None
+            }
+        };
 
-    /// Transform data in place (both encrypt and decrypt use the same operation for CTR mode)
+        #[cfg(feature = "defmt")]
+        {
+            match &result {
+                Some(ChannelKey::AES128(_)) => defmt::info!("Created AES-128 ChannelKey"),
+                Some(ChannelKey::AES256(_)) => defmt::info!("Created AES-256 ChannelKey"),
+                None => defmt::error!("Failed to create ChannelKey"),
+            }
+        }
+
+        result
+    }/// Transform data in place (both encrypt and decrypt use the same operation for CTR mode)
     pub fn transform(&self, data: &mut [u8], iv: &[u8; 16]) -> Result<(), KeyError> {
+        #[cfg(feature = "defmt")]
+        defmt::info!("Starting key transformation on {} bytes of data", data.len());
+        
         if data.is_empty() {
+            #[cfg(feature = "defmt")]
+            defmt::error!("Cannot transform empty data");
             return Err(KeyError::EmptyData);
         }
 
-        match self {
+        #[cfg(feature = "defmt")]
+        {
+            defmt::info!("IV: {:02X}", iv);
+            defmt::info!("Data before transformation: {:02X}", &data);
+        }
+
+        let result = match self {
             ChannelKey::AES128(key) => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Using AES-128 CTR mode");
+                
                 // AES-CTR mode is symmetrical - same operation for encrypt and decrypt
                 let mut cipher = Ctr128BE::<Aes128>::new(key.into(), iv.into());
                 cipher.apply_keystream(data);
                 Ok(())
             }
             ChannelKey::AES256(key) => {
+                #[cfg(feature = "defmt")]
+                defmt::info!("Using AES-256 CTR mode");
+                
                 let mut cipher = Ctr128BE::<Aes256>::new(key.into(), iv.into());
                 cipher.apply_keystream(data);
                 Ok(())
             }
+        };
+
+        #[cfg(feature = "defmt")]
+        {
+            match result {
+                Ok(()) => {
+                    defmt::info!("Key transformation successful");
+                    defmt::info!("Data after transformation: {:02X}", &data);
+                }
+                Err(e) => defmt::error!("Key transformation failed: {:?}", e),
+            }
         }
+
+        result
     }
 }

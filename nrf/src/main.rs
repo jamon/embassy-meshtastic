@@ -255,7 +255,6 @@ async fn main(spawner: Spawner) {
         handle_received_packet(
             &tx_buffer,
             packet_len,
-            &mut decrypted_buffer,
             10,  // Mock SNR value
             -50, // Mock RSSI value
         );
@@ -302,13 +301,11 @@ async fn main(spawner: Spawner) {
                 trace!("rx successful, len = {}, {}", received_len, rx_pkt_status);
 
                 let received_len = received_len as usize;
-                trace!("Received packet: {:02X}", &receiving_buffer[..received_len]);
-
-                // decode header
-                let header = Header::from_bytes(&receiving_buffer[..16]).unwrap();                handle_received_packet(
+                trace!("Received packet: {:02X}", &receiving_buffer[..received_len]);                // decode header
+                let _header = Header::from_bytes(&receiving_buffer[..16]).unwrap();
+                handle_received_packet(
                     &receiving_buffer,
                     received_len,
-                    &mut decrypted_buffer,
                     rx_pkt_status.snr,
                     rx_pkt_status.rssi,
                 );
@@ -321,20 +318,29 @@ async fn main(spawner: Spawner) {
 fn handle_received_packet(
     receiving_buffer: &[u8],
     received_len: usize,
-    _decrypted_buffer: &mut [u8], // No longer needed with type-based approach
     snr: i16,
     rssi: i16,
 ) {
     use meshtassy_net::key::ChannelKey;
     
+    info!("=== Processing received packet ===");
+    info!("Received {} bytes, SNR: {}, RSSI: {}", received_len, snr, rssi);
+    info!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
+    
     // Create encrypted packet from received bytes
     if let Some(encrypted_pkt) = Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8) {
+        info!("Successfully parsed encrypted packet");
+        
         // Create channel key from raw bytes (1-byte key with default key + LSB replacement)
         if let Some(key) = ChannelKey::from_bytes(&[0x01; 1], 1) {
+            info!("Successfully created channel key for decryption");
+            
             // Decrypt the packet
-            match encrypted_pkt.decrypt(&key) {                Ok(decrypted_pkt) => {
+            match encrypted_pkt.decrypt(&key) {
+                Ok(decrypted_pkt) => {
+                    info!("✓ Successfully decrypted packet!");
                     trace!("Header: {:?}", decrypted_pkt.header);
-                    trace!("Decrypted payload: {:02X}", decrypted_pkt.payload_data());
+                    trace!("Decrypted payload: {:02X}", decrypted_pkt.payload[..decrypted_pkt.payload_len]);
                     
                     // Try to decode the packet into structured data
                     match decrypted_pkt.decode() {
@@ -397,7 +403,7 @@ fn handle_received_packet(
                     }
                 }
                 Err(_) => {
-                    info!("Failed to decrypt packet");
+                    info!("✗ Failed to decrypt packet - this is the main issue!");
                 }
             }
         } else {
@@ -455,8 +461,7 @@ fn create_text_message_packet(
         // Create a decrypted packet first
         let mut full_payload = [0u8; 240];
         full_payload[..encoded_payload_len].copy_from_slice(&payload_buffer[..encoded_payload_len]);
-        
-        let decrypted_packet = Packet::<Decrypted>::new(
+          let _decrypted_packet = Packet::<Decrypted>::new(
             header.clone(),
             0, // rssi placeholder
             0, // snr placeholder  
@@ -470,9 +475,8 @@ fn create_text_message_packet(
         
         // Copy payload to output buffer
         tx_buffer[16..16 + encoded_payload_len].copy_from_slice(&payload_buffer[..encoded_payload_len]);
-        
-        // Generate IV from header
-        let iv = header.generate_iv();
+          // Generate IV from header using the correct Meshtastic protocol format
+        let iv = header.create_iv();
         
         // Encrypt in place
         match channel_key.transform(&mut tx_buffer[16..16 + encoded_payload_len], &iv) {

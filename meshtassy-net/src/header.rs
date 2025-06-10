@@ -2,7 +2,7 @@
 use defmt;
 
 /// Represents a parsed packet header (16 bytes)
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Header {
     /// Destination node ID (bytes 0-3)
     pub destination: u32,
@@ -86,22 +86,47 @@ impl defmt::Format for Header {
     }
 }
 
-impl Header {
-    /// Parse a 16-byte header from a byte slice
+impl Header {    /// Parse a 16-byte header from a byte slice
     /// Returns None if the slice is not exactly 16 bytes
     pub fn from_bytes(header_bytes: &[u8]) -> Option<Self> {
+        #[cfg(feature = "defmt")]
+        defmt::info!("Parsing header from {} bytes", header_bytes.len());
+        
         if header_bytes.len() != 16 {
+            #[cfg(feature = "defmt")]
+            defmt::error!("Invalid header length: {} (expected 16)", header_bytes.len());
             return None;
         }
 
+        let destination = u32::from_le_bytes(header_bytes[0..4].try_into().ok()?);
+        let source = u32::from_le_bytes(header_bytes[4..8].try_into().ok()?);
+        let packet_id = u32::from_le_bytes(header_bytes[8..12].try_into().ok()?);
+        let flags = HeaderFlags::from_raw(header_bytes[12]);
+        let channel_hash = header_bytes[13];
+        let next_hop = header_bytes[14];
+        let relay_node = header_bytes[15];
+
+        #[cfg(feature = "defmt")]
+        {
+            defmt::info!("Parsed header fields:");
+            defmt::info!("  destination: 0x{:08X}", destination);
+            defmt::info!("  source: 0x{:08X}", source);
+            defmt::info!("  packet_id: 0x{:08X}", packet_id);
+            defmt::info!("  flags: hop_limit={}, hop_start={}, want_ack={}, via_mqtt={}", 
+                        flags.hop_limit, flags.hop_start, flags.want_ack, flags.via_mqtt);
+            defmt::info!("  channel_hash: 0x{:02X}", channel_hash);
+            defmt::info!("  next_hop: 0x{:02X}", next_hop);
+            defmt::info!("  relay_node: 0x{:02X}", relay_node);
+        }
+
         Some(Header {
-            destination: u32::from_le_bytes(header_bytes[0..4].try_into().ok()?),
-            source: u32::from_le_bytes(header_bytes[4..8].try_into().ok()?),
-            packet_id: u32::from_le_bytes(header_bytes[8..12].try_into().ok()?),
-            flags: HeaderFlags::from_raw(header_bytes[12]),
-            channel_hash: header_bytes[13],
-            next_hop: header_bytes[14],
-            relay_node: header_bytes[15],
+            destination,
+            source,
+            packet_id,
+            flags,
+            channel_hash,
+            next_hop,
+            relay_node,
         })
     }
 
@@ -116,9 +141,7 @@ impl Header {
         bytes[14] = self.next_hop;
         bytes[15] = self.relay_node;
         bytes
-    }
-
-    /// Create an IV/nonce for packet encryption following the protocol specification
+    }    /// Create an IV/nonce for packet encryption following the protocol specification
     ///
     /// IV format (16 bytes):
     /// - Bytes 0-7: packet_id (64-bit, native byte order)
@@ -126,11 +149,19 @@ impl Header {
     /// - Bytes 12-15: Must be zero (reserved/extraNonce, unused in current protocol)
     ///
     pub fn create_iv(&self) -> [u8; 16] {
+        #[cfg(feature = "defmt")]
+        defmt::info!("Creating IV from header: packet_id=0x{:08X}, source=0x{:08X}", 
+                    self.packet_id, self.source);
+        
         let mut iv = [0u8; 16];
         let packet_id = self.packet_id as u64; // high 32 bits implicitly zero
         iv[..8].copy_from_slice(&packet_id.to_ne_bytes());
         iv[8..12].copy_from_slice(&self.source.to_ne_bytes());
         // iv[12..16] remains zero per Meshtastic protocol
+        
+        #[cfg(feature = "defmt")]
+        defmt::info!("Generated IV: {:02X}", iv);
+        
         iv
     }
 
@@ -171,9 +202,11 @@ impl Header {
             next_hop,
             relay_node,
         }
-    }
-
-    /// Generate the IV for AES-CTR encryption/decryption
+    }    /// Generate the IV for AES-CTR encryption/decryption
+    /// 
+    /// ⚠️ DEPRECATED: This method uses an incorrect IV format.
+    /// Use `create_iv()` instead for proper Meshtastic protocol compatibility.
+    #[deprecated(since = "0.1.0", note = "Use create_iv() instead - this method uses incorrect IV format")]
     pub fn generate_iv(&self) -> [u8; 16] {
         let mut iv = [0u8; 16];
         // IV is composed of packet ID and source address
@@ -187,11 +220,20 @@ impl Header {
 impl HeaderFlags {
     /// Create MeshtasticHeaderFlags from a raw byte
     pub fn from_raw(flags_raw: u8) -> Self {
+        let hop_limit = flags_raw & 0b00000111;
+        let want_ack = (flags_raw & 0b00001000) != 0;
+        let via_mqtt = (flags_raw & 0b00010000) != 0;
+        let hop_start = (flags_raw >> 5) & 0b00000111;
+
+        #[cfg(feature = "defmt")]
+        defmt::info!("Parsing flags from raw byte 0x{:02X}: hop_limit={}, want_ack={}, via_mqtt={}, hop_start={}", 
+                    flags_raw, hop_limit, want_ack, via_mqtt, hop_start);
+
         HeaderFlags {
-            hop_limit: flags_raw & 0b00000111,
-            want_ack: (flags_raw & 0b00001000) != 0,
-            via_mqtt: (flags_raw & 0b00010000) != 0,
-            hop_start: (flags_raw >> 5) & 0b00000111,
+            hop_limit,
+            want_ack,
+            via_mqtt,
+            hop_start,
         }
     }
 
