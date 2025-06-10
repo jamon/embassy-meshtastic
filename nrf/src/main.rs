@@ -29,15 +29,15 @@ use embassy_usb::{Builder, Config};
 
 use meshtassy_net::header::HeaderFlags;
 use meshtassy_net::{
-    Decrypted, Encrypted, Header, Packet, Decoded,
+    Decrypted, Encrypted, Header, Packet, DecodedPacket,
 };
 use meshtassy_net::key::ChannelKey;
 use meshtastic_protobufs::meshtastic::{
     Data, PortNum,
 };
 
-static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet<Decoded>, 8, 8, 1> =
-    PubSubChannel::<CriticalSectionRawMutex, Packet<Decoded>, 8, 8, 1>::new();
+static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1> =
+    PubSubChannel::<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1>::new();
 
 static NODE_DATABASE: Mutex<
     CriticalSectionRawMutex,
@@ -364,7 +364,7 @@ fn handle_received_packet(
     // High Level overview of packet processing:
     // 1. Packet::<Encrypted>::from_bytes(buffer)  => Packet<Encrypted>
     // 2. .decrypt(&ChannelKey)                    => Packet<Decrypted>
-    // 3. .decode()                                => Packet<Decoded>
+    // 3. .decode()                                => DecodedPacket
     // the decoded packet is equivalent to the `Data` protobuf message, but also has the header, rssi, and snr fields
 
     // 1. Create encrypted packet from received bytes
@@ -372,27 +372,23 @@ fn handle_received_packet(
         warn!("✗ Failed to parse encrypted packet from bytes");
         return;
     };
-    trace!("✓ Successfully parsed encrypted packet");
-
-
+    trace!("✓ Successfully parsed encrypted packet: {:?}", encrypted_pkt);
 
     // 2. Decrypt the packet
     let Ok(decrypted_pkt) = encrypted_pkt.decrypt(&key) else {
         info!("✗ Failed to decrypt packet");
         return;
     };
-    info!("✓ Successfully decrypted packet!");
-    trace!("Header: {:?}", decrypted_pkt.header);
-    trace!("Decrypted payload: {:02X}", decrypted_pkt.payload[..decrypted_pkt.payload_len]);
-    
+    info!("✓ Successfully decrypted packet: {:?}", decrypted_pkt);
+
     // 3. Try to decode the packet into structured data
     let Ok(decoded_pkt) = decrypted_pkt.decode() else {
         info!("✗ Failed to decode packet to structured data");
         return;
     };
-    trace!("✓ Successfully decoded packet to structured data");
+    trace!("✓ Successfully decoded packet to structured data {:?}", decoded_pkt);
 
-    
+
     // Publish the decoded packet to the channel
     PACKET_CHANNEL.publish_immediate(decoded_pkt.clone());
     
@@ -512,7 +508,7 @@ fn create_text_message_packet(
 }
 
 fn format_packet_for_serial<'a>(
-    packet: &Packet<Decoded>,
+    packet: &DecodedPacket,
     buffer: &'a mut [u8],
 ) -> Option<&'a [u8]> {
     let mut pos = 0;

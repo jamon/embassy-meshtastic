@@ -150,7 +150,7 @@ impl Header {    /// Parse a 16-byte header from a byte slice
     ///
     pub fn create_iv(&self) -> [u8; 16] {
         #[cfg(feature = "defmt")]
-        defmt::info!("Creating IV from header: packet_id=0x{:08X}, source=0x{:08X}", 
+        defmt::trace!("Creating IV from header: packet_id=0x{:08X}, source=0x{:08X}", 
                     self.packet_id, self.source);
         
         let mut iv = [0u8; 16];
@@ -160,7 +160,7 @@ impl Header {    /// Parse a 16-byte header from a byte slice
         // iv[12..16] remains zero per Meshtastic protocol
         
         #[cfg(feature = "defmt")]
-        defmt::info!("Generated IV: {:02X}", iv);
+        defmt::trace!("Generated IV: {:02X}", iv);
         
         iv
     }
@@ -202,18 +202,6 @@ impl Header {    /// Parse a 16-byte header from a byte slice
             next_hop,
             relay_node,
         }
-    }    /// Generate the IV for AES-CTR encryption/decryption
-    /// 
-    /// ⚠️ DEPRECATED: This method uses an incorrect IV format.
-    /// Use `create_iv()` instead for proper Meshtastic protocol compatibility.
-    #[deprecated(since = "0.1.0", note = "Use create_iv() instead - this method uses incorrect IV format")]
-    pub fn generate_iv(&self) -> [u8; 16] {
-        let mut iv = [0u8; 16];
-        // IV is composed of packet ID and source address
-        iv[0..4].copy_from_slice(&self.packet_id.to_le_bytes());
-        iv[4..8].copy_from_slice(&self.source.to_le_bytes());
-        // Remaining bytes stay zero
-        iv
     }
 }
 
@@ -226,7 +214,7 @@ impl HeaderFlags {
         let hop_start = (flags_raw >> 5) & 0b00000111;
 
         #[cfg(feature = "defmt")]
-        defmt::info!("Parsing flags from raw byte 0x{:02X}: hop_limit={}, want_ack={}, via_mqtt={}, hop_start={}", 
+        defmt::trace!("Parsing flags from raw byte 0x{:02X}: hop_limit={}, want_ack={}, via_mqtt={}, hop_start={}", 
                     flags_raw, hop_limit, want_ack, via_mqtt, hop_start);
 
         HeaderFlags {

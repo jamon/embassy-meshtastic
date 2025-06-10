@@ -27,13 +27,16 @@ pub mod node_database;
 
 /// Marker types to distinguish between encrypted and decrypted packet states
 #[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Encrypted;
 
 #[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Decrypted;
 
 /// Marker type for a packet with decoded payload
 #[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Decoded;
 
 /// Owned Data payload that doesn't depend on zero-copy lifetimes
@@ -55,7 +58,7 @@ impl OwnedData {
     /// Convert from protobuf Data to owned data
     pub fn from_protobuf(data: &meshtastic_protobufs::meshtastic::Data) -> Self {
         #[cfg(feature = "defmt")]
-        defmt::info!("Converting protobuf Data to OwnedData");
+        defmt::trace!("Converting protobuf Data to OwnedData");
 
         
         #[cfg(feature = "defmt")]
@@ -67,11 +70,16 @@ impl OwnedData {
             defmt::info!("  dest: 0x{:08X}", data.dest);
             defmt::info!("  source: 0x{:08X}", data.source);
         }
-        
+
+        let mut new_payload = [0u8; 240];
+        let copy_len = data.payload.len().min(240);
+        new_payload[..copy_len].copy_from_slice(&data.payload[..copy_len]);
+
+
         Self {
             portnum: data.portnum,
-            payload: data.payload[..data.payload.len()].try_into().unwrap_or([0u8; 240]),
-            payload_len: data.payload.len(),
+            payload: new_payload,
+            payload_len: copy_len,
             want_response: data.want_response,
             dest: data.dest,
             source: data.source,
@@ -91,6 +99,30 @@ pub struct Packet<S> {
     pub payload: [u8; 240],
     pub payload_len: usize,
     pub _marker: core::marker::PhantomData<S>,
+}
+
+/// A decoded packet with structured data
+#[derive(Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct DecodedPacket {
+    pub header: Header,
+    pub rssi: i8,
+    pub snr: i8,
+    pub data: OwnedData,
+}
+
+#[cfg(feature = "defmt")]
+impl<S> defmt::Format for Packet<S> {
+    fn format(&self, fmt: defmt::Formatter) {
+        defmt::write!(
+            fmt,
+            "Packet {{ header: {}, rssi: {}, snr: {}, payload_len: {} }}",
+            self.header,
+            self.rssi,
+            self.snr,
+            self.payload_len
+        );
+    }
 }
 
 impl<S> Packet<S> {
@@ -193,8 +225,7 @@ impl Packet<Encrypted> {
             Ok(()) => {
                 #[cfg(feature = "defmt")]
                 {
-                    defmt::info!("Decryption successful!");
-                    defmt::info!("Decrypted payload: {:02X}", decrypted_payload[..self.payload_len]);
+                    defmt::trace!("Decrypted payload: {:02X}", decrypted_payload[..self.payload_len]);
                 }
                 
                 Ok(Packet {
@@ -215,24 +246,8 @@ impl Packet<Encrypted> {
 }
 
 impl Packet<Decrypted> {
-    pub fn port_num(&self) -> femtopb::EnumValue<meshtastic_protobufs::meshtastic::PortNum> {
-        if self.payload_len > 0 {
-            let port_byte = self.payload[0];
-            #[cfg(feature = "defmt")]
-            defmt::info!("Extracting port number: raw byte = 0x{:02X} ({})", port_byte, port_byte);
-            
-            // For now, return unknown since PortNum doesn't implement TryFrom<i32>
-            // We'll need to implement this conversion manually
-            femtopb::EnumValue::Unknown(port_byte as i32)
-        } else {
-            #[cfg(feature = "defmt")]
-            defmt::warn!("Empty payload when extracting port number");
-            femtopb::EnumValue::Unknown(0)
-        }
-    }    
- 
     /// Decode the payload into structured data
-    pub fn decode(self) -> Result<Packet<Decoded>, ()> {
+    pub fn decode(self) -> Result<DecodedPacket, ()> {
         #[cfg(feature = "defmt")]
         defmt::info!("Starting packet decode process");
         
@@ -252,135 +267,63 @@ impl Packet<Decrypted> {
             defmt::info!("Attempting to decode protobuf Data from {} bytes", self.payload_len);
             defmt::info!("Payload data: {:02X}", &self.payload[..self.payload_len]);
         }
-
-        match meshtastic_protobufs::meshtastic::Data::decode(&self.payload[..self.payload_len]) {
-            Ok(data) => {
-                #[cfg(feature = "defmt")]
-                {
-                    defmt::info!("Successfully decoded protobuf Data");
-                    defmt::info!("  portnum: {:?}", data.portnum);
-                    defmt::info!("  payload length: {}", data.payload.len());
-                    defmt::info!("  want_response: {}", data.want_response);
-                    defmt::info!("  dest: 0x{:08X}", data.dest);
-                    defmt::info!("  source: 0x{:08X}", data.source);
-                    defmt::info!("  request_id: {}", data.request_id);
-                    defmt::info!("  reply_id: {}", data.reply_id);
-                    if data.payload.len() > 0 {
-                        defmt::info!("  payload first 8 bytes: {:02X}", 
-                                    &data.payload[..data.payload.len().min(8)]);
-                    }
-                }
-                
-                // Convert protobuf data to owned data
-                let owned_data = OwnedData::from_protobuf(&data);
-                
-                #[cfg(feature = "defmt")]
-                defmt::info!("Converted to OwnedData, re-encoding into packet format");
-                
-                // Encode the owned data back into the payload format
-                let mut new_payload = [0u8; 240];
-                new_payload[0] = match owned_data.portnum {
-                    femtopb::EnumValue::Known(p) => {
-                        let port_byte = p as u8;
-                        #[cfg(feature = "defmt")]
-                        defmt::info!("Using known port number: {} (0x{:02X})", p as i32, port_byte);
-                        port_byte
-                    },
-                    femtopb::EnumValue::Unknown(u) => {
-                        let port_byte = u as u8;
-                        #[cfg(feature = "defmt")]
-                        defmt::info!("Using unknown port number: {} (0x{:02X})", u, port_byte);
-                        port_byte
-                    },
-                };
-                
-                // For now, just copy the original payload data
-                let data_len = owned_data.payload_len.min(239);
-                new_payload[1..1 + data_len].copy_from_slice(&owned_data.payload[..data_len]);
-
-                #[cfg(feature = "defmt")]
-                defmt::info!("Successfully created decoded packet with total length: {}", 1 + data_len);
-
-                Ok(Packet {
-                    header: self.header,
-                    rssi: self.rssi,
-                    snr: self.snr,
-                    payload: new_payload,
-                    payload_len: 1 + data_len,
-                    _marker: core::marker::PhantomData,
-                })
-            }            
-            Err(e) => {
-                #[cfg(feature = "defmt")]
-                {
-                    defmt::error!("Failed to decode protobuf Data: {:?}", e);
-                    defmt::error!("Raw payload data being decoded: {:02X}", &self.payload[..self.payload_len]);
-                }
-                #[cfg(not(feature = "defmt"))]
-                let _ = e; // Suppress unused variable warning when defmt is not enabled
-                Err(())
+        let Ok(data) = meshtastic_protobufs::meshtastic::Data::decode(&self.payload[..self.payload_len]) else {
+            #[cfg(feature = "defmt")]
+            {
+                defmt::error!("Failed to decode protobuf Data from payload");
+                defmt::error!("Payload data: {:02X}", &self.payload[..self.payload_len]);
+            }
+            return Err(());
+        };
+        
+        #[cfg(feature = "defmt")]
+        {
+            defmt::info!("Successfully decoded protobuf Data");
+            defmt::info!("  portnum: {:?}", data.portnum);
+            defmt::info!("  payload length: {}", data.payload.len());
+            defmt::info!("  want_response: {}", data.want_response);
+            defmt::info!("  dest: 0x{:08X}", data.dest);
+            defmt::info!("  source: 0x{:08X}", data.source);
+            defmt::info!("  request_id: {}", data.request_id);
+            defmt::info!("  reply_id: {}", data.reply_id);
+            if data.payload.len() > 0 {
+                defmt::info!("  payload first 8 bytes: {:02X}", 
+                            &data.payload[..data.payload.len().min(8)]);
             }
         }
+        
+        // Convert protobuf data to owned data
+        let owned_data = OwnedData::from_protobuf(&data);
+        
+        #[cfg(feature = "defmt")]
+        {
+            defmt::trace!("Converted to OwnedData, re-encoding into packet format");
+            defmt::trace!(" OwnedData {:?}", owned_data);
+        }
+
+        Ok(DecodedPacket {
+            header: self.header,
+            rssi: self.rssi,
+            snr: self.snr,
+            data: owned_data,
+        })
     }
 }
 
-impl Packet<Decoded> {
+impl DecodedPacket {
+    /// Get the port number from the decoded packet data
     pub fn port_num(&self) -> femtopb::EnumValue<meshtastic_protobufs::meshtastic::PortNum> {
-        if self.payload_len > 0 {
-            let port_byte = self.payload[0];
-            #[cfg(feature = "defmt")]
-            defmt::info!("Decoded packet port number: raw byte = 0x{:02X} ({})", port_byte, port_byte);
-            femtopb::EnumValue::Unknown(port_byte as i32)
-        } else {
-            #[cfg(feature = "defmt")]
-            defmt::warn!("Empty decoded packet when extracting port number");
-            femtopb::EnumValue::Unknown(0)
-        }
-    }    pub fn data(&self) -> Result<OwnedData, ()> {
-        #[cfg(feature = "defmt")]
-        defmt::info!("Extracting data from decoded packet");
-        
-        if self.payload_len == 0 {
-            #[cfg(feature = "defmt")]
-            defmt::error!("Cannot extract data: decoded packet payload is empty");
-            return Err(());
-        }
-
-        let payload_data = if self.payload_len > 1 {
-            &self.payload[1..self.payload_len]
-        } else {
-            #[cfg(feature = "defmt")]
-            defmt::warn!("No payload data in decoded packet (only port byte present)");
-            &[]
-        };
-
-        #[cfg(feature = "defmt")]
-        defmt::info!("Attempting to decode {} bytes of payload data", payload_data.len());
-
-        // Try to decode as protobuf Data and convert to owned
-        match meshtastic_protobufs::meshtastic::Data::decode(payload_data) {
-            Ok(data) => {
-                #[cfg(feature = "defmt")]
-                {
-                    defmt::info!("Successfully extracted Data from decoded packet");
-                    defmt::info!("  portnum: {:?}", data.portnum);
-                    defmt::info!("  inner payload length: {}", data.payload.len());
-                }
-                Ok(OwnedData::from_protobuf(&data))
-            },
-            Err(e) => {
-                #[cfg(feature = "defmt")]
-                {
-                    defmt::error!("Failed to extract Data from decoded packet: {:?}", e);
-                    if payload_data.len() > 0 {
-                        defmt::error!("Failed payload data: {:02X}", payload_data);
-                    }
-                }
-                #[cfg(not(feature = "defmt"))]
-                let _ = e; // Suppress unused variable warning when defmt is not enabled
-                Err(())
-            }
-        }
+        self.data.portnum
+    }
+    
+    /// Get the payload data from the decoded packet
+    pub fn payload_data(&self) -> &[u8] {
+        &self.data.payload[..self.data.payload_len]
+    }
+    
+    /// Get a reference to the owned data
+    pub fn data(&self) -> Result<&OwnedData, ()> {
+        Ok(&self.data)
     }
 }
 
@@ -429,39 +372,9 @@ pub fn channel_hash(channel_name: &str) -> u32 {
 
 /// Debug helper functions for packet analysis
 impl<S> Packet<S> {
-    /// Get a human-readable description of the packet
-    pub fn debug_info(&self) -> DebugInfo {
-        DebugInfo {
-            header: self.header,
-            rssi: self.rssi,
-            snr: self.snr,
-            payload_len: self.payload_len,
-        }
-    }
+
 }
 
-/// Debug information structure for logging
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct DebugInfo {
-    pub header: Header,
-    pub rssi: i8,
-    pub snr: i8,
-    pub payload_len: usize,
-}
-
-impl DebugInfo {
-    /// Log packet information with defmt
-    #[cfg(feature = "defmt")]
-    pub fn log(&self) {
-        defmt::info!("=== Packet Debug Info ===");
-        defmt::info!("Header: {}", self.header);
-        defmt::info!("RSSI: {} dBm", self.rssi);
-        defmt::info!("SNR: {} dB", self.snr);
-        defmt::info!("Payload length: {} bytes", self.payload_len);
-        defmt::info!("========================");
-    }
-}
 
 /// Helper function to validate packet structure
 pub fn validate_packet_structure(data: &[u8]) -> Result<(), &'static str> {

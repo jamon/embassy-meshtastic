@@ -326,8 +326,9 @@ impl NodeDatabase {
     /// This method handles the packet decoding and node database update
     pub fn add_or_update_node_from_packet(
         &mut self,
-        packet: &crate::Packet<crate::Decoded>,
-    ) -> bool {        let node_num = packet.header.source;
+        packet: &crate::DecodedPacket,
+    ) -> bool {
+        let node_num = packet.header.source;
         let port_num = packet.port_num();
 
         // Get the owned data from the decoded packet
@@ -339,7 +340,9 @@ impl NodeDatabase {
         match port_num {
             femtopb::EnumValue::Known(PortNum::NodeinfoApp) => {
                 // Decode payload as User message
-                if let Ok(user_info) = meshtastic_protobufs::meshtastic::User::decode(&owned_data.payload[..owned_data.payload_len]) {
+                if let Ok(user_info) = meshtastic_protobufs::meshtastic::User::decode(
+                    &owned_data.payload[..owned_data.payload_len],
+                ) {
                     // Create a NodeInfo with the user information
                     let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
                         let mut new_node = NodeInfo::default();
@@ -360,8 +363,11 @@ impl NodeDatabase {
                 } else {
                     false
                 }
-            }            femtopb::EnumValue::Known(PortNum::PositionApp) => {
-                if let Ok(position) = meshtastic_protobufs::meshtastic::Position::decode(&owned_data.payload[..owned_data.payload_len]) {
+            }
+            femtopb::EnumValue::Known(PortNum::PositionApp) => {
+                if let Ok(position) = meshtastic_protobufs::meshtastic::Position::decode(
+                    &owned_data.payload[..owned_data.payload_len],
+                ) {
                     // Create a NodeInfo with the position information
                     let mut node_info = self.get_node(node_num).cloned().unwrap_or_else(|| {
                         let mut new_node = NodeInfo::default();
@@ -382,8 +388,11 @@ impl NodeDatabase {
                 } else {
                     false
                 }
-            }            femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
-                if let Ok(telemetry) = Telemetry::decode(&owned_data.payload[..owned_data.payload_len]) {
+            }
+            femtopb::EnumValue::Known(PortNum::TelemetryApp) => {
+                if let Ok(telemetry) =
+                    Telemetry::decode(&owned_data.payload[..owned_data.payload_len])
+                {
                     // Handle telemetry data
                     if let Some(device_metrics) = DeviceMetrics::from_protobuf(&telemetry) {
                         // Update or create node with telemetry data

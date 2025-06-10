@@ -164,7 +164,7 @@ impl ChannelKey {    /// Create a ChannelKey from raw bytes
     }/// Transform data in place (both encrypt and decrypt use the same operation for CTR mode)
     pub fn transform(&self, data: &mut [u8], iv: &[u8; 16]) -> Result<(), KeyError> {
         #[cfg(feature = "defmt")]
-        defmt::info!("Starting key transformation on {} bytes of data", data.len());
+        defmt::trace!("Starting key transformation on {} bytes of data", data.len());
         
         if data.is_empty() {
             #[cfg(feature = "defmt")]
@@ -174,14 +174,14 @@ impl ChannelKey {    /// Create a ChannelKey from raw bytes
 
         #[cfg(feature = "defmt")]
         {
-            defmt::info!("IV: {:02X}", iv);
-            defmt::info!("Data before transformation: {:02X}", &data);
+            defmt::trace!("IV: {:02X}", iv);
+            defmt::trace!("Data before transformation: {:02X}", &data);
         }
 
         let result = match self {
             ChannelKey::AES128(key) => {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Using AES-128 CTR mode");
+                defmt::trace!("Using AES-128 CTR mode");
                 
                 // AES-CTR mode is symmetrical - same operation for encrypt and decrypt
                 let mut cipher = Ctr128BE::<Aes128>::new(key.into(), iv.into());
@@ -190,7 +190,7 @@ impl ChannelKey {    /// Create a ChannelKey from raw bytes
             }
             ChannelKey::AES256(key) => {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Using AES-256 CTR mode");
+                defmt::trace!("Using AES-256 CTR mode");
                 
                 let mut cipher = Ctr128BE::<Aes256>::new(key.into(), iv.into());
                 cipher.apply_keystream(data);
@@ -202,8 +202,7 @@ impl ChannelKey {    /// Create a ChannelKey from raw bytes
         {
             match result {
                 Ok(()) => {
-                    defmt::info!("Key transformation successful");
-                    defmt::info!("Data after transformation: {:02X}", &data);
+                    defmt::trace!("Data after transformation: {:02X}", &data);
                 }
                 Err(e) => defmt::error!("Key transformation failed: {:?}", e),
             }
