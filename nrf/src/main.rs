@@ -694,28 +694,52 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
                         Some(meshtastic_protobufs::meshtastic::to_radio::PayloadVariant::WantConfigId(config_id)) => {
                             info!("Client requesting config with ID: {}", config_id);
                             
+                            let mut packet_id = 0x10000000u32;
+                            
                             // Send MyNodeInfo packet
-                            let from_radio_packet = create_my_node_info_packet(0x10000000);
+                            let from_radio_packet = create_my_node_info_packet(packet_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+                            packet_id += 1;
 
                             // Send NodeInfo packet for our own node
-                            let from_radio_packet = create_node_info_packet(0x10000001);
+                            let from_radio_packet = create_node_info_packet(packet_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+                            packet_id += 1;
+
+                            // Send NodeInfo packets for all nodes in the database
+                            if let Ok(db_guard) = NODE_DATABASE.try_lock() {
+                                if let Some(ref database) = *db_guard {
+                                    let node_count = database.get_nodes().count();
+                                    info!("Sending NodeInfo for {} nodes from database", node_count);
+                                    
+                                    for node in database.get_nodes() {
+                                        // Skip our own node (already sent above)
+                                        if node.num != 0xDEADBEEF {
+                                            let from_radio_packet = create_node_info_packet_from_db(packet_id, node);
+                                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+                                            packet_id += 1;
+                                        }
+                                    }
+                                }
+                            }
 
                             // Send Config packet  
-                            let from_radio_packet = create_config_packet(0x10000002);
+                            let from_radio_packet = create_config_packet(packet_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+                            packet_id += 1;
 
                             // Send ModuleConfig packet
-                            let from_radio_packet = create_module_config_packet(0x10000003);
+                            let from_radio_packet = create_module_config_packet(packet_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+                            packet_id += 1;
 
                             // Send Channel packet
-                            let from_radio_packet = create_channel_packet(0x10000004);
+                            let from_radio_packet = create_channel_packet(packet_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+                            packet_id += 1;
 
                             // Send ConfigComplete packet
-                            let from_radio_packet = create_config_complete_packet(0x10000005, config_id);
+                            let from_radio_packet = create_config_complete_packet(packet_id, config_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
 
                         },
@@ -992,5 +1016,34 @@ fn encode_from_radio_packet(packet: &FromRadio, buffer: &mut [u8]) -> Option<usi
             Some(encoded_len)
         }
         Err(_) => None,
+    }
+}
+
+/// Create a FromRadio packet containing NodeInfo from our internal node database
+fn create_node_info_packet_from_db(packet_id: u32, node: &meshtassy_net::node_database::NodeInfo) -> FromRadio {
+    // For now, we'll create a basic NodeInfo packet without user details
+    // since the string lifetime management is complex
+    let node_info = NodeInfo {
+        num: node.num,
+        user: None,  // TODO: Add user conversion when we solve string lifetime issues
+        position: None,  // TODO: Convert position if we add position support
+        snr: node.snr,
+        last_heard: node.last_heard,
+        device_metrics: None,  // TODO: Convert device metrics if needed
+        channel: 0,
+        via_mqtt: false,
+        hops_away: Some(1),  // Other nodes are at least 1 hop away
+        is_favorite: false,
+        is_ignored: false,
+        is_key_manually_verified: false,
+        unknown_fields: Default::default(),
+    };
+
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::NodeInfo(node_info),
+        ),
+        unknown_fields: Default::default(),
     }
 }
