@@ -6,6 +6,7 @@ use core::u32;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
+use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::{bind_interrupts, pac, peripherals, rng, spim, usb};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -16,9 +17,9 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 use femtopb::Message as _;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{Sx1262, Sx126x, Sx126xVariant, TcxoCtrlVoltage};
-use lora_phy::{mod_params::*, sx126x};
+use lora_phy::{mod_params::*, sx126x, DelayNs};
 use lora_phy::{LoRa, RxMode};
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 use {defmt_rtt as _, panic_probe as _};
 
 use embassy_futures::join::join;
@@ -28,13 +29,9 @@ use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 
 use meshtassy_net::header::HeaderFlags;
-use meshtassy_net::{
-    Decrypted, Encrypted, Header, Packet, Decoded,
-};
 use meshtassy_net::key::ChannelKey;
-use meshtastic_protobufs::meshtastic::{
-    Data, PortNum,
-};
+use meshtassy_net::{Decoded, Decrypted, Encrypted, Header, Packet};
+use meshtastic_protobufs::meshtastic::{Data, PortNum};
 
 static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet<Decoded>, 8, 8, 1> =
     PubSubChannel::<CriticalSectionRawMutex, Packet<Decoded>, 8, 8, 1>::new();
@@ -64,7 +61,8 @@ const LORA_BANDWIDTH: Bandwidth = Bandwidth::_250KHz;
 const LORA_CODINGRATE: CodingRate = CodingRate::_4_5;
 
 bind_interrupts!(struct Irqs {
-    TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
+    TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    TWISPI1 => spim::InterruptHandler<peripherals::TWISPI1>;
     RNG => rng::InterruptHandler<peripherals::RNG>;
     USBD => usb::InterruptHandler<peripherals::USBD>;
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
@@ -131,18 +129,79 @@ async fn main(spawner: Spawner) {
     let cdc = CdcAcmClass::new(&mut builder, state, 64);
     let usb = builder.build();
 
-    let nss = Output::new(p.P0_04, Level::High, OutputDrive::Standard);
-    let reset = Output::new(p.P0_28, Level::High, OutputDrive::Standard);
-    let dio1 = Input::new(p.P0_03, Pull::Down);
-    let busy = Input::new(p.P0_29, Pull::None);
+    let nss = Output::new(p.P1_10, Level::High, OutputDrive::Standard);
+    let reset = Output::new(p.P1_06, Level::High, OutputDrive::Standard);
+    let dio1 = Input::new(p.P1_15, Pull::Down);
+    let busy = Input::new(p.P1_14, Pull::None);
 
     let mut spi_config = spim::Config::default();
     spi_config.frequency = spim::Frequency::M16;
-    let spi_sck = p.P1_13;
-    let spi_miso = p.P1_14;
-    let spi_mosi = p.P1_15;
-    let spim = spim::Spim::new(p.TWISPI0, Irqs, spi_sck, spi_miso, spi_mosi, spi_config);
+    let spi_sck = p.P1_11;
+    let spi_miso = p.P1_13;
+    let spi_mosi = p.P1_12;
+    let spim = spim::Spim::new(p.TWISPI1, Irqs, spi_sck, spi_miso, spi_mosi, spi_config);
     let spi = ExclusiveDevice::new(spim, nss, Delay);
+
+    // Try initializing the I2C bus
+    info!("Try initializing the RAM buffer for I2C");
+    static RAM_BUFFER: ConstStaticCell<[u8; 16]> = ConstStaticCell::new([0; 16]);
+    info!("Try initializing the I2C bus");
+    let i2c_config = twim::Config::default();
+    let mut twi = Twim::new(
+        p.TWISPI0,
+        Irqs,
+        p.P0_13,
+        p.P0_14,
+        i2c_config,
+        RAM_BUFFER.take(),
+    );
+
+    // Try initializing a BME
+    info!("Try initializing a BME on the I2C bus");
+    let bme_config = bosch_bme680::Configuration::default();
+    let mut bme = bosch_bme680::AsyncBme680::new(
+        twi,
+        bosch_bme680::DeviceAddress::Secondary,
+        Delay,
+        24, // wrong initial temperature, is it in C?
+    );
+    match bme.initialize(&bme_config).await {
+        Ok(_) => {
+            info!("Configured BME! Trying to read...");
+            Delay.delay_ms(12000).await; // 12 second delay after configuration
+            match bme.measure().await {
+                Ok(values) => {
+                    info!("Humidity: {:?}%", values.humidity);
+                    info!("Temperature: {:?}", values.temperature);
+                    info!("Pressure: {:?}", values.pressure);
+                    match values.gas_resistance {
+                        Some(gr) => info!("Gas Resistance: {:?}", gr),
+                        None => (),
+                    }
+                }
+                Err(x) => info!(
+                    "Could not read BME measurements: {:?}",
+                    match x {
+                        bosch_bme680::BmeError::WriteError(_) => "Write Error",
+                        bosch_bme680::BmeError::WriteReadError(_) => "Write Read Error",
+                        bosch_bme680::BmeError::UnexpectedChipId(_) => "Unexpected Chip ID",
+                        bosch_bme680::BmeError::MeasuringTimeOut => "Measuring Time Out",
+                        bosch_bme680::BmeError::Uninitialized => "Uninitialized",
+                    }
+                ),
+            }
+        }
+        Err(x) => info!(
+            "Could not configure BME: {:?}",
+            match x {
+                bosch_bme680::BmeError::WriteError(_) => "Write Error",
+                bosch_bme680::BmeError::WriteReadError(_) => "Write Read Error",
+                bosch_bme680::BmeError::UnexpectedChipId(_) => "Unexpected Chip ID",
+                bosch_bme680::BmeError::MeasuringTimeOut => "Measuring Time Out",
+                bosch_bme680::BmeError::Uninitialized => "Uninitialized",
+            }
+        ),
+    }
 
     // are we configured to use DIO2 as RF switch?  (This should be true for Sx1262)
     info!("Use dio2 as RFSwitch? {:?}", Sx1262.use_dio2_as_rfswitch());
@@ -252,13 +311,11 @@ async fn main(spawner: Spawner) {
         create_text_message_packet(&tx_header, "Hello, world!", &[0x01u8], 1, &mut tx_buffer)
     {
         info!("Created message packet with length: {}", packet_len);
-        
+
         // Test our packet decoding by processing it through handle_received_packet
         info!("Testing packet decoding with our created packet:");
         handle_received_packet(
-            &tx_buffer,
-            packet_len,
-            10,  // Mock SNR value
+            &tx_buffer, packet_len, 10,  // Mock SNR value
             -50, // Mock RSSI value
         );
 
@@ -304,7 +361,7 @@ async fn main(spawner: Spawner) {
                 trace!("rx successful, len = {}, {}", received_len, rx_pkt_status);
 
                 let received_len = received_len as usize;
-                trace!("Received packet: {:02X}", &receiving_buffer[..received_len]);                // decode header
+                trace!("Received packet: {:02X}", &receiving_buffer[..received_len]); // decode header
                 let _header = Header::from_bytes(&receiving_buffer[..16]).unwrap();
                 handle_received_packet(
                     &receiving_buffer,
@@ -314,16 +371,17 @@ async fn main(spawner: Spawner) {
                 );
             }
             Err(err) => info!("rx unsuccessful = {}", err),
-        }    }
+        }
+    }
 }
 
 fn log_packet_info(
-    header: &Header, 
-    node_info: Option<&meshtassy_net::node_database::NodeInfo>, 
-    rssi: i16, 
-    snr: i16, 
-    port_name: &str, 
-    payload: &[u8]
+    header: &Header,
+    node_info: Option<&meshtassy_net::node_database::NodeInfo>,
+    rssi: i16,
+    snr: i16,
+    port_name: &str,
+    payload: &[u8],
 ) {
     match node_info {
         Some(source) => {
@@ -341,13 +399,7 @@ fn log_packet_info(
     }
 }
 
-fn handle_received_packet(
-    receiving_buffer: &[u8],
-    received_len: usize,
-    snr: i16,
-    rssi: i16,
-) {
-
+fn handle_received_packet(receiving_buffer: &[u8], received_len: usize, snr: i16, rssi: i16) {
     // Create channel key from raw bytes (1-byte key with default key + LSB replacement)
     // @TODO need to replace this with a proper key management system
     let Some(key) = ChannelKey::from_bytes(&[0x01; 1], 1) else {
@@ -356,9 +408,11 @@ fn handle_received_packet(
     };
     trace!("✓ Successfully created channel key for decryption");
 
-
     info!("=== Processing received packet ===");
-    info!("Received {} bytes, SNR: {}, RSSI: {}", received_len, snr, rssi);
+    info!(
+        "Received {} bytes, SNR: {}, RSSI: {}",
+        received_len, snr, rssi
+    );
     info!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
 
     // High Level overview of packet processing:
@@ -368,13 +422,13 @@ fn handle_received_packet(
     // the decoded packet is equivalent to the `Data` protobuf message, but also has the header, rssi, and snr fields
 
     // 1. Create encrypted packet from received bytes
-    let Some(encrypted_pkt) = Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8) else {
+    let Some(encrypted_pkt) =
+        Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8)
+    else {
         warn!("✗ Failed to parse encrypted packet from bytes");
         return;
     };
     trace!("✓ Successfully parsed encrypted packet");
-
-
 
     // 2. Decrypt the packet
     let Ok(decrypted_pkt) = encrypted_pkt.decrypt(&key) else {
@@ -383,8 +437,11 @@ fn handle_received_packet(
     };
     info!("✓ Successfully decrypted packet!");
     trace!("Header: {:?}", decrypted_pkt.header);
-    trace!("Decrypted payload: {:02X}", decrypted_pkt.payload[..decrypted_pkt.payload_len]);
-    
+    trace!(
+        "Decrypted payload: {:02X}",
+        decrypted_pkt.payload[..decrypted_pkt.payload_len]
+    );
+
     // 3. Try to decode the packet into structured data
     let Ok(decoded_pkt) = decrypted_pkt.decode() else {
         info!("✗ Failed to decode packet to structured data");
@@ -392,40 +449,53 @@ fn handle_received_packet(
     };
     trace!("✓ Successfully decoded packet to structured data");
 
-    
     // Publish the decoded packet to the channel
     PACKET_CHANNEL.publish_immediate(decoded_pkt.clone());
-    
+
     // Try to get the owned data for logging
     let Ok(owned_data) = decoded_pkt.data() else {
         info!("✗ Failed to get owned data from decoded packet");
         return;
     };
-    
+
     trace!("Decoded packet data: {:?}", owned_data);
     let portnum = owned_data.portnum;
-    
+
     // Log the packet based on port type
     let port_name = match portnum {
         femtopb::EnumValue::Known(PortNum::TelemetryApp) => "TELEMETRY",
-        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO", 
+        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO",
         femtopb::EnumValue::Known(PortNum::PositionApp) => "POSITION",
         femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => "NEIGHBORINFO",
         femtopb::EnumValue::Known(PortNum::TextMessageApp) => "TEXT",
         femtopb::EnumValue::Known(PortNum::RoutingApp) => "ROUTING",
         femtopb::EnumValue::Known(PortNum::TracerouteApp) => "TRACEROUTE",
         _ => "OTHER",
-    };        
-    
+    };
+
     // Log packet with optional node info from database
     if let Ok(db_guard) = NODE_DATABASE.try_lock() {
         let node_info = db_guard
             .as_ref()
             .and_then(|db| db.get_node(decoded_pkt.header.source));
-        
-        log_packet_info(&decoded_pkt.header, node_info, rssi, snr, port_name, &owned_data.payload[..owned_data.payload_len]);
+
+        log_packet_info(
+            &decoded_pkt.header,
+            node_info,
+            rssi,
+            snr,
+            port_name,
+            &owned_data.payload[..owned_data.payload_len],
+        );
     } else {
-        log_packet_info(&decoded_pkt.header, None, rssi, snr, port_name, &owned_data.payload[..owned_data.payload_len]);
+        log_packet_info(
+            &decoded_pkt.header,
+            None,
+            rssi,
+            snr,
+            port_name,
+            &owned_data.payload[..owned_data.payload_len],
+        );
     }
 }
 
@@ -439,7 +509,7 @@ fn create_text_message_packet(
     tx_buffer: &mut [u8; 256],
 ) -> Option<usize> {
     use meshtassy_net::key::ChannelKey;
-    
+
     // Create the data payload
     let data = Data {
         portnum: femtopb::EnumValue::Known(PortNum::TextMessageApp),
@@ -476,10 +546,10 @@ fn create_text_message_packet(
         // Create a decrypted packet first
         let mut full_payload = [0u8; 240];
         full_payload[..encoded_payload_len].copy_from_slice(&payload_buffer[..encoded_payload_len]);
-          let _decrypted_packet = Packet::<Decrypted>::new(
+        let _decrypted_packet = Packet::<Decrypted>::new(
             header.clone(),
             0, // rssi placeholder
-            0, // snr placeholder  
+            0, // snr placeholder
             full_payload,
             encoded_payload_len,
         );
@@ -487,12 +557,13 @@ fn create_text_message_packet(
         // Now we need to encrypt this. For now, let's manually do the encryption
         // Copy header to output buffer
         tx_buffer[..16].copy_from_slice(&header.to_bytes());
-        
+
         // Copy payload to output buffer
-        tx_buffer[16..16 + encoded_payload_len].copy_from_slice(&payload_buffer[..encoded_payload_len]);
-          // Generate IV from header using the correct Meshtastic protocol format
+        tx_buffer[16..16 + encoded_payload_len]
+            .copy_from_slice(&payload_buffer[..encoded_payload_len]);
+        // Generate IV from header using the correct Meshtastic protocol format
         let iv = header.create_iv();
-        
+
         // Encrypt in place
         match channel_key.transform(&mut tx_buffer[16..16 + encoded_payload_len], &iv) {
             Ok(()) => {
@@ -502,7 +573,8 @@ fn create_text_message_packet(
                 Some(total_len)
             }
             Err(_) => {
-                info!("Failed to encrypt packet");                None
+                info!("Failed to encrypt packet");
+                None
             }
         }
     } else {
