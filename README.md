@@ -41,7 +41,9 @@ The modular design of embassy-rs makes it relatively easy to port to other board
 
 ### Longer term goals
 - [ ] Support official Meshtastic clients
-- [ ] Serial support
+  - [x] Initial connection, partial support
+  - [ ] TODO: add more tasks here
+- [x] Serial support
 - [ ] Bluetooth support
 - [ ] WiFi support
 - [ ] Support configuration (preferably without reboots, preferably support Meshtastic client managed config)
