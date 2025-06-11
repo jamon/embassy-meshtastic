@@ -769,6 +769,29 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
                     }
                 };
 
+                // Check if this is a NodeInfo packet and send it as a FromRadio packet
+                if let femtopb::EnumValue::Known(PortNum::NodeinfoApp) = packet.port_num() {
+                    info!("Received NodeInfo packet from node {}, forwarding to client", packet.header.source);
+                    
+                    // Try to get the node from the database and send a NodeInfo packet
+                    if let Ok(db_guard) = NODE_DATABASE.try_lock() {
+                        if let Some(ref database) = *db_guard {
+                            if let Some(node) = database.get_node(packet.header.source) {
+                                // Generate a unique packet ID for this real-time NodeInfo update
+                                let packet_id = 0x20000000u32 + packet.header.source;
+                                let from_radio_packet = create_node_info_packet_from_db(packet_id, node);
+                                
+                                let mut encoded_buffer = [0u8; 256];
+                                if let Err(_) = send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await {
+                                    info!("Failed to send NodeInfo packet to USB");
+                                } else {
+                                    info!("Successfully sent NodeInfo packet for node {} to USB", packet.header.source);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Format packet as JSON-like string for serial output
                 let mut buffer = [0u8; 512];
                 let formatted = format_packet_for_serial(&packet, &mut buffer);
