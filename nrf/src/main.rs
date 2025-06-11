@@ -512,98 +512,6 @@ fn create_text_message_packet(
     }
 }
 
-fn format_packet_for_serial<'a>(packet: &DecodedPacket, buffer: &'a mut [u8]) -> Option<&'a [u8]> {
-    let mut pos = 0;
-
-    // Helper function to append string to buffer
-    let append_str = |buf: &mut [u8], position: &mut usize, s: &str| -> bool {
-        let bytes = s.as_bytes();
-        if *position + bytes.len() > buf.len() {
-            return false;
-        }
-        buf[*position..*position + bytes.len()].copy_from_slice(bytes);
-        *position += bytes.len();
-        true
-    };
-
-    // Helper function to append hex byte
-    let append_hex = |buf: &mut [u8], position: &mut usize, byte: u8| -> bool {
-        if *position + 2 > buf.len() {
-            return false;
-        }
-        let hex_chars = b"0123456789ABCDEF";
-        buf[*position] = hex_chars[(byte >> 4) as usize];
-        buf[*position + 1] = hex_chars[(byte & 0x0F) as usize];
-        *position += 2;
-        true
-    };
-
-    // Format packet information
-    if !append_str(buffer, &mut pos, "{\"source\":\"0x") {
-        return None;
-    }
-    for i in (0..4).rev() {
-        if !append_hex(buffer, &mut pos, (packet.header.source >> (i * 8)) as u8) {
-            return None;
-        }
-    }
-    if !append_str(buffer, &mut pos, "\",\"dest\":\"0x") {
-        return None;
-    }
-    for i in (0..4).rev() {
-        if !append_hex(
-            buffer,
-            &mut pos,
-            (packet.header.destination >> (i * 8)) as u8,
-        ) {
-            return None;
-        }
-    }
-    if !append_str(buffer, &mut pos, "\",\"id\":\"0x") {
-        return None;
-    }
-    for i in (0..4).rev() {
-        if !append_hex(buffer, &mut pos, (packet.header.packet_id >> (i * 8)) as u8) {
-            return None;
-        }
-    }
-
-    // Add port type
-    if !append_str(buffer, &mut pos, "\",\"port\":\"") {
-        return None;
-    }
-    let port_str = match packet.port_num() {
-        femtopb::EnumValue::Known(PortNum::TextMessageApp) => "TEXT",
-        femtopb::EnumValue::Known(PortNum::TelemetryApp) => "TELEMETRY",
-        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO",
-        femtopb::EnumValue::Known(PortNum::PositionApp) => "POSITION",
-        femtopb::EnumValue::Unknown(_) => "UNKNOWN",
-        _ => "OTHER",
-    };
-    if !append_str(buffer, &mut pos, port_str) {
-        return None;
-    }
-
-    if !append_str(buffer, &mut pos, "\",\"payload\":\"") {
-        return None;
-    }
-
-    // Add payload as hex string from the owned data if possible
-    if let Ok(owned_data) = packet.data() {
-        let payload_limit = owned_data.payload_len.min(32);
-        for i in 0..payload_limit {
-            if !append_hex(buffer, &mut pos, owned_data.payload[i]) {
-                break;
-            }
-        }
-    }
-
-    if !append_str(buffer, &mut pos, "\"}\r\n") {
-        return None;
-    }
-
-    Some(&buffer[..pos])
-}
 
 struct Disconnected {}
 
@@ -827,21 +735,6 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
                     },
                     _ => {
                         // For other packet types, we don't forward them as FromRadio packets
-                        // but they still get formatted as JSON-like output below
-                    }
-                }
-
-                // Format packet as JSON-like string for serial output
-                let mut buffer = [0u8; 512];
-                let formatted = format_packet_for_serial(&packet, &mut buffer);
-
-                if let Some(data) = formatted {
-                    // Split data into 64-byte chunks to stay within USB packet limits
-                    for chunk in data.chunks(64) {
-                        match class.write_packet(chunk).await {
-                            Ok(_) => {}
-                            Err(_) => return Err(Disconnected {}),
-                        }
                     }
                 }
             }
@@ -1064,20 +957,7 @@ fn create_channel_packet(packet_id: u32) -> FromRadio<'static> {
     }
 }
 
-// fn create_channels_packet(packet_id: u32) -> FromRadio<'static> {
-//     FromRadio {
-//         id: packet_id,
-//         payload_variant: Some(
-//             meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::Channels(
-//                 meshtastic_protobufs::meshtastic::Channels {
-//                     channels: vec![],
-//                     unknown_fields: Default::default(),
-//                 },
-//             ),
-//         ),
-//         unknown_fields: Default::default(),
-//     }
-// }
+
 /// Encode a FromRadio packet to bytes for transmission over serial/BLE/etc
 fn encode_from_radio_packet(packet: &FromRadio, buffer: &mut [u8]) -> Option<usize> {
     let buffer_len = buffer.len();
