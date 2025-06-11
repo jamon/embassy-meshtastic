@@ -3,6 +3,7 @@
 
 use core::u32;
 
+use crate::usb_framer::Framer;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
@@ -19,22 +20,21 @@ use lora_phy::sx126x::{Sx1262, Sx126x, Sx126xVariant, TcxoCtrlVoltage};
 use lora_phy::{mod_params::*, sx126x};
 use lora_phy::{LoRa, RxMode};
 use static_cell::StaticCell;
+
 use {defmt_rtt as _, panic_probe as _};
 
 use embassy_futures::join::join;
+use embassy_futures::select::{select, Either};
 use embassy_nrf::usb::vbus_detect::{HardwareVbusDetect, VbusDetect};
 use embassy_nrf::usb::{Driver, Instance};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, Config};
 
 use meshtassy_net::header::HeaderFlags;
-use meshtassy_net::{
-    Decrypted, Encrypted, Header, Packet, DecodedPacket,
-};
 use meshtassy_net::key::ChannelKey;
-use meshtastic_protobufs::meshtastic::{
-    Data, PortNum,
-};
+use meshtassy_net::{DecodedPacket, Decrypted, Encrypted, Header, Packet};
+use meshtastic_protobufs::meshtastic::{Data, FromRadio, MyNodeInfo, PortNum, ToRadio};
+mod usb_framer;
 
 static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1> =
     PubSubChannel::<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1>::new();
@@ -175,13 +175,31 @@ async fn main(spawner: Spawner) {
     // Initialize the node databases
     initialize_node_database().await;
 
+    // Demonstrate creating a MyNodeInfo packet
+    info!("=== MyNodeInfo Packet Demo ===");
+    let demo_packet = create_my_node_info_packet(0x12345678);
+    let mut demo_buffer = [0u8; 256];
+
+    if let Some(encoded_len) = encode_from_radio_packet(&demo_packet, &mut demo_buffer) {
+        info!("✓ Successfully created MyNodeInfo packet");
+        info!("  Node number: 0x{:08X}", 0xDEADBEEFu32);
+        info!("  Reboot count: 42");
+        info!("  Min app version: 30200 (3.2.0)");
+        info!("  Device ID: EMBASSY_NRF52");
+        info!("  Platform: embassy_nrf52");
+        info!("  Encoded size: {} bytes", encoded_len);
+        trace!("  Encoded data: {:02X}", &demo_buffer[..encoded_len]);
+    } else {
+        info!("✗ Failed to encode MyNodeInfo packet");
+    }
+
     info!(
         "Starting Meshtastic Radio on frequency {} Hz with syncword 0x{:02X}",
         LORA_FREQUENCY_IN_HZ, LORA_SYNCWORD
     );
 
     let mut receiving_buffer = [0u8; 256];
-    let mut decrypted_buffer = [0u8; 240]; // 256 - 16 for header
+    let _decrypted_buffer = [0u8; 240]; // 256 - 16 for header
 
     let mdltn_params = {
         match lora.create_modulation_params(
@@ -252,13 +270,11 @@ async fn main(spawner: Spawner) {
         create_text_message_packet(&tx_header, "Hello, world!", &[0x01u8], 1, &mut tx_buffer)
     {
         info!("Created message packet with length: {}", packet_len);
-        
+
         // Test our packet decoding by processing it through handle_received_packet
         info!("Testing packet decoding with our created packet:");
         handle_received_packet(
-            &tx_buffer,
-            packet_len,
-            10,  // Mock SNR value
+            &tx_buffer, packet_len, 10,  // Mock SNR value
             -50, // Mock RSSI value
         );
 
@@ -304,7 +320,7 @@ async fn main(spawner: Spawner) {
                 trace!("rx successful, len = {}, {}", received_len, rx_pkt_status);
 
                 let received_len = received_len as usize;
-                trace!("Received packet: {:02X}", &receiving_buffer[..received_len]);                // decode header
+                trace!("Received packet: {:02X}", &receiving_buffer[..received_len]); // decode header
                 let _header = Header::from_bytes(&receiving_buffer[..16]).unwrap();
                 handle_received_packet(
                     &receiving_buffer,
@@ -314,15 +330,16 @@ async fn main(spawner: Spawner) {
                 );
             }
             Err(err) => info!("rx unsuccessful = {}", err),
-        }    }
+        }
+    }
 }
 
 fn log_packet_info(
-    header: &Header, 
-    node_info: Option<&meshtassy_net::node_database::NodeInfo>, 
-    rssi: i16, 
-    snr: i16, 
-    port_name: &str, 
+    header: &Header,
+    node_info: Option<&meshtassy_net::node_database::NodeInfo>,
+    rssi: i16,
+    snr: i16,
+    port_name: &str,
 ) {
     match node_info {
         Some(source) => {
@@ -340,13 +357,7 @@ fn log_packet_info(
     }
 }
 
-fn handle_received_packet(
-    receiving_buffer: &[u8],
-    received_len: usize,
-    snr: i16,
-    rssi: i16,
-) {
-
+fn handle_received_packet(receiving_buffer: &[u8], received_len: usize, snr: i16, rssi: i16) {
     // Create channel key from raw bytes (1-byte key with default key + LSB replacement)
     // @TODO need to replace this with a proper key management system
     let Some(key) = ChannelKey::from_bytes(&[0x01; 1], 1) else {
@@ -355,9 +366,11 @@ fn handle_received_packet(
     };
     trace!("✓ Successfully created channel key for decryption");
 
-
     info!("=== Processing received packet ===");
-    info!("Received {} bytes, SNR: {}, RSSI: {}", received_len, snr, rssi);
+    info!(
+        "Received {} bytes, SNR: {}, RSSI: {}",
+        received_len, snr, rssi
+    );
     trace!("Raw packet: {:02X}", &receiving_buffer[..received_len]);
 
     // High Level overview of packet processing:
@@ -367,11 +380,16 @@ fn handle_received_packet(
     // the decoded packet is equivalent to the `Data` protobuf message, but also has the header, rssi, and snr fields
 
     // 1. Create encrypted packet from received bytes
-    let Some(encrypted_pkt) = Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8) else {
+    let Some(encrypted_pkt) =
+        Packet::<Encrypted>::from_bytes(&receiving_buffer[..received_len], rssi as i8, snr as i8)
+    else {
         warn!("✗ Failed to parse encrypted packet from bytes");
         return;
     };
-    trace!("✓ Successfully parsed encrypted packet: {:?}", encrypted_pkt);
+    trace!(
+        "✓ Successfully parsed encrypted packet: {:?}",
+        encrypted_pkt
+    );
 
     // 2. Decrypt the packet
     let Ok(decrypted_pkt) = encrypted_pkt.decrypt(&key) else {
@@ -385,33 +403,35 @@ fn handle_received_packet(
         info!("✗ Failed to decode packet to structured data");
         return;
     };
-    trace!("✓ Successfully decoded packet to structured data {:?}", decoded_pkt);
-
+    trace!(
+        "✓ Successfully decoded packet to structured data {:?}",
+        decoded_pkt
+    );
 
     // Publish the decoded packet to the channel
     PACKET_CHANNEL.publish_immediate(decoded_pkt.clone());
-    
+
     // Try to get the owned data for logging
     let Ok(owned_data) = decoded_pkt.data() else {
         info!("✗ Failed to get owned data from decoded packet");
         return;
     };
-    
+
     trace!("Decoded packet data: {:?}", owned_data);
     let portnum = owned_data.portnum;
-    
+
     // Log the packet based on port type
     let port_name = match portnum {
         femtopb::EnumValue::Known(PortNum::TelemetryApp) => "TELEMETRY",
-        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO", 
+        femtopb::EnumValue::Known(PortNum::NodeinfoApp) => "NODEINFO",
         femtopb::EnumValue::Known(PortNum::PositionApp) => "POSITION",
         femtopb::EnumValue::Known(PortNum::NeighborinfoApp) => "NEIGHBORINFO",
         femtopb::EnumValue::Known(PortNum::TextMessageApp) => "TEXT",
         femtopb::EnumValue::Known(PortNum::RoutingApp) => "ROUTING",
         femtopb::EnumValue::Known(PortNum::TracerouteApp) => "TRACEROUTE",
         _ => "OTHER",
-    };        
-    
+    };
+
     // Log packet with optional node info from database
     if let Ok(db_guard) = NODE_DATABASE.try_lock() {
         let node_info = db_guard
@@ -434,7 +454,7 @@ fn create_text_message_packet(
     tx_buffer: &mut [u8; 256],
 ) -> Option<usize> {
     use meshtassy_net::key::ChannelKey;
-    
+
     // Create the data payload
     let data = Data {
         portnum: femtopb::EnumValue::Known(PortNum::TextMessageApp),
@@ -471,10 +491,10 @@ fn create_text_message_packet(
         // Create a decrypted packet first
         let mut full_payload = [0u8; 240];
         full_payload[..encoded_payload_len].copy_from_slice(&payload_buffer[..encoded_payload_len]);
-          let _decrypted_packet = Packet::<Decrypted>::new(
+        let _decrypted_packet = Packet::<Decrypted>::new(
             header.clone(),
             0, // rssi placeholder
-            0, // snr placeholder  
+            0, // snr placeholder
             full_payload,
             encoded_payload_len,
         );
@@ -482,12 +502,13 @@ fn create_text_message_packet(
         // Now we need to encrypt this. For now, let's manually do the encryption
         // Copy header to output buffer
         tx_buffer[..16].copy_from_slice(&header.to_bytes());
-        
+
         // Copy payload to output buffer
-        tx_buffer[16..16 + encoded_payload_len].copy_from_slice(&payload_buffer[..encoded_payload_len]);
-          // Generate IV from header using the correct Meshtastic protocol format
+        tx_buffer[16..16 + encoded_payload_len]
+            .copy_from_slice(&payload_buffer[..encoded_payload_len]);
+        // Generate IV from header using the correct Meshtastic protocol format
         let iv = header.create_iv();
-        
+
         // Encrypt in place
         match channel_key.transform(&mut tx_buffer[16..16 + encoded_payload_len], &iv) {
             Ok(()) => {
@@ -497,7 +518,8 @@ fn create_text_message_packet(
                 Some(total_len)
             }
             Err(_) => {
-                info!("Failed to encrypt packet");                None
+                info!("Failed to encrypt packet");
+                None
             }
         }
     } else {
@@ -506,10 +528,7 @@ fn create_text_message_packet(
     }
 }
 
-fn format_packet_for_serial<'a>(
-    packet: &DecodedPacket,
-    buffer: &'a mut [u8],
-) -> Option<&'a [u8]> {
+fn format_packet_for_serial<'a>(packet: &DecodedPacket, buffer: &'a mut [u8]) -> Option<&'a [u8]> {
     let mut pos = 0;
 
     // Helper function to append string to buffer
@@ -621,27 +640,133 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
 ) -> Result<(), Disconnected> {
     let mut subscriber = PACKET_CHANNEL.subscriber().unwrap();
 
+    // Simple state machine for packet reception
+    info!("Waiting for command packet from USB serial...");
+
+    let mut buf = [0u8; 64]; // USB packet buffer
+    let mut packet_buffer = [0u8; 512]; // Buffer to store the complete packet
+    let mut framer = Framer::new();
+
     loop {
-        let wait_result = subscriber.next_message().await;
-        let packet = match wait_result {
-            embassy_sync::pubsub::WaitResult::Message(msg) => msg,
-            embassy_sync::pubsub::WaitResult::Lagged(_) => {
-                let lag_msg = b"[PACKET FORWARDER LAGGED]\n";
-                let _ = class.write_packet(lag_msg).await;
-                continue;
+        // Use embassy-futures select function to handle both USB reads and subscriber messages
+        match select(class.read_packet(&mut buf), subscriber.next_message()).await {
+            Either::First(_) => {
+                // Handle USB CDC ACM read
+                if let Some(packet) = framer.push_bytes(&buf) {
+                    let packet_len = packet.len().min(packet_buffer.len());
+                    packet_buffer[..packet_len].copy_from_slice(&packet[..packet_len]);
+                    info!(
+                        "Received command packet: {:02X}",
+                        &packet_buffer[..packet_len]
+                    );
+
+                    info!("Received command packet: {:02X}", packet);
+                    let Ok(decoded_packet) = ToRadio::decode(&packet) else {
+                        info!("✗ Failed to decode ToRadio packet");
+                        return Err(Disconnected {});
+                    };
+                    info!(
+                        "✓ Successfully decoded ToRadio packet: {:?}",
+                        decoded_packet
+                    );
+
+                    // Declare encoded_buffer outside the match statement so it can be used in all arms
+                    let mut encoded_buffer = [0u8; 256];
+
+                    match decoded_packet.payload_variant {
+                        Some(meshtastic_protobufs::meshtastic::to_radio::PayloadVariant::WantConfigId(config_id)) => {
+                            let from_radio_packet = create_my_node_info_packet(0x10000000);
+                            let Some(encoded_len) = encode_from_radio_packet(&from_radio_packet, &mut encoded_buffer)
+                            else {
+                                info!("✗ Failed to encode MyNodeInfo packet");
+                                return Err(Disconnected {});
+                            };
+
+                            info!("(2) Preparing to send MyNodeInfo packet over USB serial...");
+
+                            // Write magic bytes and length as a single packet
+                            let mut header = [0u8; 4];
+                            header[0] = 0x94;
+                            header[1] = 0xc3;
+                            let length_bytes = (encoded_len as u16).to_be_bytes();
+                            header[2] = length_bytes[0];
+                            header[3] = length_bytes[1];
+
+                            info!("Sending USB packet with header: {:02X}", &header);
+                            class.write_packet(&header).await?;
+
+                            // Write the encoded packet data
+                            info!(
+                                "Sending encoded MyNodeInfo packet: {:02X}",
+                                &encoded_buffer[..encoded_len]
+                            );
+                            for chunk in encoded_buffer[..encoded_len].chunks(64) {
+                                class.write_packet(chunk).await?;
+                            }
+
+                            let from_radio_packet = create_config_complete_packet(0x10000001, config_id);
+                            let Some(encoded_len) = encode_from_radio_packet(&from_radio_packet, &mut encoded_buffer)
+                            else {
+                                info!("✗ Failed to encode MyNodeInfo packet");
+                                return Err(Disconnected {});
+                            };
+                            let length_bytes = (encoded_len as u16).to_be_bytes();
+                            let header = [
+                                0x94,
+                                0xc3,
+                                length_bytes[0],
+                                length_bytes[1],
+                            ];
+                            info!("Sending ConfigComplete packet with header: {:02X}", &header);
+                            class.write_packet(&header).await?;
+                            info!(
+                                "Sending encoded ConfigComplete packet: {:02X}",
+                                &encoded_buffer[..encoded_len]
+                            );
+                            for chunk in encoded_buffer[..encoded_len].chunks(64) {
+                                class.write_packet(chunk).await?;
+                            }
+                            info!("ConfigComplete packet sent successfully");
+
+                        },
+                        Some(meshtastic_protobufs::meshtastic::to_radio::PayloadVariant::Heartbeat(_)) => {
+                            info!("Received heartbeat request - connection kept alive");
+                            // Heartbeat requests typically don't require a response
+                            // The device just acknowledges by staying awake and continuing the connection
+                        },
+                        _ => {
+                            info!("Received unsupported ToRadio payload variant");
+                            continue;
+                        }
+                    }
+                } else {
+                    info!("Invalid command packet received");
+                    continue;
+                }
             }
-        };
+            Either::Second(wait_result) => {
+                // Handle subscriber messages
+                let packet = match wait_result {
+                    embassy_sync::pubsub::WaitResult::Message(msg) => msg,
+                    embassy_sync::pubsub::WaitResult::Lagged(_) => {
+                        let lag_msg = b"[PACKET FORWARDER LAGGED]\n";
+                        let _ = class.write_packet(lag_msg).await;
+                        continue;
+                    }
+                };
 
-        // Format packet as JSON-like string for serial output
-        let mut buffer = [0u8; 512];
-        let formatted = format_packet_for_serial(&packet, &mut buffer);
+                // Format packet as JSON-like string for serial output
+                let mut buffer = [0u8; 512];
+                let formatted = format_packet_for_serial(&packet, &mut buffer);
 
-        if let Some(data) = formatted {
-            // Split data into 64-byte chunks to stay within USB packet limits
-            for chunk in data.chunks(64) {
-                match class.write_packet(chunk).await {
-                    Ok(_) => {}
-                    Err(_) => return Err(Disconnected {}),
+                if let Some(data) = formatted {
+                    // Split data into 64-byte chunks to stay within USB packet limits
+                    for chunk in data.chunks(64) {
+                        match class.write_packet(chunk).await {
+                            Ok(_) => {}
+                            Err(_) => return Err(Disconnected {}),
+                        }
+                    }
                 }
             }
         }
@@ -678,4 +803,51 @@ async fn initialize_node_database() {
     let mut database_guard = NODE_DATABASE.lock().await;
     *database_guard = Some(meshtassy_net::node_database::NodeDatabase::new());
     info!("Node database initialized");
+}
+
+/// Create a FromRadio packet containing MyNodeInfo with hardcoded values
+/// This demonstrates how to construct a basic MyNodeInfo packet for device identification
+fn create_my_node_info_packet(packet_id: u32) -> FromRadio<'static> {
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::MyInfo(MyNodeInfo {
+                my_node_num: 0xDEADBEEF, // Hardcoded node number - should be unique device ID
+                reboot_count: 42,        // Number of reboots (hardcoded for demo)
+                min_app_version: 30200,  // Minimum app version (3.2.0)
+                device_id: b"EMBASSY_NRF52", // 16-byte device identifier
+                pio_env: "embassy_nrf52", // Platform environment name
+                unknown_fields: Default::default(),
+            }),
+        ),
+        unknown_fields: Default::default(),
+    }
+}
+
+/// Create a FromRadio packet containing ConfigComplete with hardcoded values
+/// This demonstrates how to construct a basic MyNodeInfo packet for device identification
+fn create_config_complete_packet(packet_id: u32, config_complete_id: u32) -> FromRadio<'static> {
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::ConfigCompleteId(
+                config_complete_id,
+            ),
+        ),
+        unknown_fields: Default::default(),
+    }
+}
+
+/// Encode a FromRadio packet to bytes for transmission over serial/BLE/etc
+fn encode_from_radio_packet(packet: &FromRadio, buffer: &mut [u8]) -> Option<usize> {
+    let buffer_len = buffer.len();
+    let mut slice = &mut buffer[..];
+
+    match packet.encode(&mut slice) {
+        Ok(_) => {
+            let encoded_len = buffer_len - slice.len();
+            Some(encoded_len)
+        }
+        Err(_) => None,
+    }
 }
