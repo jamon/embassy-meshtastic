@@ -393,14 +393,14 @@ fn handle_received_packet(receiving_buffer: &[u8], received_len: usize, snr: i16
 
     // 2. Decrypt the packet
     let Ok(decrypted_pkt) = encrypted_pkt.decrypt(&key) else {
-        info!("✗ Failed to decrypt packet");
+        warn!("✗ Failed to decrypt packet");
         return;
     };
     trace!("✓ Successfully decrypted packet: {:?}", decrypted_pkt);
 
     // 3. Try to decode the packet into structured data
     let Ok(decoded_pkt) = decrypted_pkt.decode() else {
-        info!("✗ Failed to decode packet to structured data");
+        warn!("✗ Failed to decode packet to structured data");
         return;
     };
     trace!(
@@ -413,7 +413,7 @@ fn handle_received_packet(receiving_buffer: &[u8], received_len: usize, snr: i16
 
     // Try to get the owned data for logging
     let Ok(owned_data) = decoded_pkt.data() else {
-        info!("✗ Failed to get owned data from decoded packet");
+        warn!("✗ Failed to get owned data from decoded packet");
         return;
     };
 
@@ -635,6 +635,41 @@ impl From<EndpointError> for Disconnected {
     }
 }
 
+// Helper function to encode and send a FromRadio packet over USB
+async fn send_packet_to_usb<'d, T: Instance + 'd, P: VbusDetect + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
+    from_radio_packet: &FromRadio<'_>,
+    buffer: &mut [u8; 256],
+) -> Result<(), Disconnected> {
+    // Encode the FromRadio packet
+    let Some(encoded_len) = encode_from_radio_packet(from_radio_packet, buffer) else {
+        info!("✗ Failed to encode FromRadio packet");
+        return Err(Disconnected {});
+    };
+
+    info!("Preparing to send FromRadio packet over USB serial...");
+
+    // Create header with magic bytes and length
+    let mut header = [0u8; 4];
+    header[0] = 0x94;
+    header[1] = 0xc3;
+    let length_bytes = (encoded_len as u16).to_be_bytes();
+    header[2] = length_bytes[0];
+    header[3] = length_bytes[1];
+
+    info!("Sending packet with header: {:02X}", &header);
+    class.write_packet(&header).await?;
+
+    // Send the encoded packet data in 64-byte chunks
+    info!("Sending encoded packet: {:02X}", &buffer[..encoded_len]);
+    for chunk in buffer[..encoded_len].chunks(64) {
+        class.write_packet(chunk).await?;
+    }
+
+    info!("FromRadio packet sent successfully");
+    Ok(())
+}
+
 async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
     class: &mut CdcAcmClass<'d, Driver<'d, T, P>>,
 ) -> Result<(), Disconnected> {
@@ -675,58 +710,13 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
 
                     match decoded_packet.payload_variant {
                         Some(meshtastic_protobufs::meshtastic::to_radio::PayloadVariant::WantConfigId(config_id)) => {
+                            // Send MyNodeInfo packet
                             let from_radio_packet = create_my_node_info_packet(0x10000000);
-                            let Some(encoded_len) = encode_from_radio_packet(&from_radio_packet, &mut encoded_buffer)
-                            else {
-                                info!("✗ Failed to encode MyNodeInfo packet");
-                                return Err(Disconnected {});
-                            };
+                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
 
-                            info!("(2) Preparing to send MyNodeInfo packet over USB serial...");
-
-                            // Write magic bytes and length as a single packet
-                            let mut header = [0u8; 4];
-                            header[0] = 0x94;
-                            header[1] = 0xc3;
-                            let length_bytes = (encoded_len as u16).to_be_bytes();
-                            header[2] = length_bytes[0];
-                            header[3] = length_bytes[1];
-
-                            info!("Sending USB packet with header: {:02X}", &header);
-                            class.write_packet(&header).await?;
-
-                            // Write the encoded packet data
-                            info!(
-                                "Sending encoded MyNodeInfo packet: {:02X}",
-                                &encoded_buffer[..encoded_len]
-                            );
-                            for chunk in encoded_buffer[..encoded_len].chunks(64) {
-                                class.write_packet(chunk).await?;
-                            }
-
+                            // Send ConfigComplete packet
                             let from_radio_packet = create_config_complete_packet(0x10000001, config_id);
-                            let Some(encoded_len) = encode_from_radio_packet(&from_radio_packet, &mut encoded_buffer)
-                            else {
-                                info!("✗ Failed to encode MyNodeInfo packet");
-                                return Err(Disconnected {});
-                            };
-                            let length_bytes = (encoded_len as u16).to_be_bytes();
-                            let header = [
-                                0x94,
-                                0xc3,
-                                length_bytes[0],
-                                length_bytes[1],
-                            ];
-                            info!("Sending ConfigComplete packet with header: {:02X}", &header);
-                            class.write_packet(&header).await?;
-                            info!(
-                                "Sending encoded ConfigComplete packet: {:02X}",
-                                &encoded_buffer[..encoded_len]
-                            );
-                            for chunk in encoded_buffer[..encoded_len].chunks(64) {
-                                class.write_packet(chunk).await?;
-                            }
-                            info!("ConfigComplete packet sent successfully");
+                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
 
                         },
                         Some(meshtastic_protobufs::meshtastic::to_radio::PayloadVariant::Heartbeat(_)) => {
