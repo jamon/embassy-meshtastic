@@ -33,7 +33,7 @@ use embassy_usb::{Builder, Config};
 use meshtassy_net::header::HeaderFlags;
 use meshtassy_net::key::ChannelKey;
 use meshtassy_net::{DecodedPacket, Decrypted, Encrypted, Header, Packet};
-use meshtastic_protobufs::meshtastic::{Data, FromRadio, MyNodeInfo, PortNum, ToRadio};
+use meshtastic_protobufs::meshtastic::{Data, FromRadio, MyNodeInfo, PortNum, ToRadio, NodeInfo, User};
 mod usb_framer;
 
 static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1> =
@@ -175,31 +175,12 @@ async fn main(spawner: Spawner) {
     // Initialize the node databases
     initialize_node_database().await;
 
-    // Demonstrate creating a MyNodeInfo packet
-    info!("=== MyNodeInfo Packet Demo ===");
-    let demo_packet = create_my_node_info_packet(0x12345678);
-    let mut demo_buffer = [0u8; 256];
-
-    if let Some(encoded_len) = encode_from_radio_packet(&demo_packet, &mut demo_buffer) {
-        info!("✓ Successfully created MyNodeInfo packet");
-        info!("  Node number: 0x{:08X}", 0xDEADBEEFu32);
-        info!("  Reboot count: 42");
-        info!("  Min app version: 30200 (3.2.0)");
-        info!("  Device ID: EMBASSY_NRF52");
-        info!("  Platform: embassy_nrf52");
-        info!("  Encoded size: {} bytes", encoded_len);
-        trace!("  Encoded data: {:02X}", &demo_buffer[..encoded_len]);
-    } else {
-        info!("✗ Failed to encode MyNodeInfo packet");
-    }
-
     info!(
         "Starting Meshtastic Radio on frequency {} Hz with syncword 0x{:02X}",
         LORA_FREQUENCY_IN_HZ, LORA_SYNCWORD
     );
 
     let mut receiving_buffer = [0u8; 256];
-    let _decrypted_buffer = [0u8; 240]; // 256 - 16 for header
 
     let mdltn_params = {
         match lora.create_modulation_params(
@@ -218,7 +199,7 @@ async fn main(spawner: Spawner) {
 
     let rx_pkt_params = {
         match lora.create_rx_packet_params(
-            16,
+            LORA_PREAMBLE_LENGTH,
             false,
             receiving_buffer.len() as u8,
             true,
@@ -687,6 +668,7 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
         match select(class.read_packet(&mut buf), subscriber.next_message()).await {
             Either::First(_) => {
                 // Handle USB CDC ACM read
+                // @TODO two requests in single packet could fail, this should be a while loop
                 if let Some(packet) = framer.push_bytes(&buf) {
                     let packet_len = packet.len().min(packet_buffer.len());
                     packet_buffer[..packet_len].copy_from_slice(&packet[..packet_len]);
@@ -710,12 +692,30 @@ async fn packet_forwarder<'d, T: Instance + 'd, P: VbusDetect + 'd>(
 
                     match decoded_packet.payload_variant {
                         Some(meshtastic_protobufs::meshtastic::to_radio::PayloadVariant::WantConfigId(config_id)) => {
+                            info!("Client requesting config with ID: {}", config_id);
+                            
                             // Send MyNodeInfo packet
                             let from_radio_packet = create_my_node_info_packet(0x10000000);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
 
+                            // Send NodeInfo packet for our own node
+                            let from_radio_packet = create_node_info_packet(0x10000001);
+                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+
+                            // Send Config packet  
+                            let from_radio_packet = create_config_packet(0x10000002);
+                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+
+                            // Send ModuleConfig packet
+                            let from_radio_packet = create_module_config_packet(0x10000003);
+                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+
+                            // Send Channel packet
+                            let from_radio_packet = create_channel_packet(0x10000004);
+                            send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
+
                             // Send ConfigComplete packet
-                            let from_radio_packet = create_config_complete_packet(0x10000001, config_id);
+                            let from_radio_packet = create_config_complete_packet(0x10000005, config_id);
                             send_packet_to_usb(class, &from_radio_packet, &mut encoded_buffer).await?;
 
                         },
@@ -814,8 +814,50 @@ fn create_my_node_info_packet(packet_id: u32) -> FromRadio<'static> {
     }
 }
 
+/// Create a FromRadio packet containing NodeInfo for our own node
+fn create_node_info_packet(packet_id: u32) -> FromRadio<'static> {
+    use meshtastic_protobufs::meshtastic::{config, HardwareModel};
+    
+    let user = User {
+        id: "!deadbeef",  // Use the same node ID as in MyNodeInfo
+        long_name: "Embassy NRF52",
+        short_name: "ENRF",
+        macaddr: &[],  // Deprecated field
+        hw_model: femtopb::EnumValue::Known(HardwareModel::Unset),
+        is_licensed: false,
+        role: femtopb::EnumValue::Known(config::device_config::Role::Client),
+        public_key: &[],  // No public key for now
+        is_unmessagable: Some(false),
+        unknown_fields: Default::default(),
+    };
+
+    let node_info = NodeInfo {
+        num: 0xDEADBEEF,  // Same as MyNodeInfo.my_node_num
+        user: Some(user),
+        position: None,  // No position info for now
+        snr: 0.0,
+        last_heard: 0,  // Current timestamp would be better
+        device_metrics: None,
+        channel: 0,
+        via_mqtt: false,
+        hops_away: Some(0),  // We are 0 hops from ourselves
+        is_favorite: false,
+        is_ignored: false,
+        is_key_manually_verified: false,
+        unknown_fields: Default::default(),
+    };
+
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::NodeInfo(node_info),
+        ),
+        unknown_fields: Default::default(),
+    }
+}
+
 /// Create a FromRadio packet containing ConfigComplete with hardcoded values
-/// This demonstrates how to construct a basic MyNodeInfo packet for device identification
+/// This demonstrates how to construct a basic ConfigComplete packet for device identification
 fn create_config_complete_packet(packet_id: u32, config_complete_id: u32) -> FromRadio<'static> {
     FromRadio {
         id: packet_id,
@@ -828,6 +870,117 @@ fn create_config_complete_packet(packet_id: u32, config_complete_id: u32) -> Fro
     }
 }
 
+/// Create a FromRadio packet containing Config with minimal placeholder data
+fn create_config_packet(packet_id: u32) -> FromRadio<'static> {
+    use meshtastic_protobufs::meshtastic::{Config, config};
+    
+    let device_config = config::DeviceConfig {
+        role: femtopb::EnumValue::Known(config::device_config::Role::Client),
+        serial_enabled: false,
+        button_gpio: 0,
+        buzzer_gpio: 0,
+        rebroadcast_mode: femtopb::EnumValue::Known(config::device_config::RebroadcastMode::All),
+        node_info_broadcast_secs: 900,
+        double_tap_as_button_press: false,
+        is_managed: false,
+        disable_triple_click: false,
+        tzdef: "",
+        led_heartbeat_disabled: false,
+        unknown_fields: Default::default(),
+    };
+
+    let config = Config {
+        payload_variant: Some(config::PayloadVariant::Device(device_config)),
+        unknown_fields: Default::default(),
+    };
+
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::Config(config),
+        ),
+        unknown_fields: Default::default(),
+    }
+}
+
+/// Create a FromRadio packet containing ModuleConfig with minimal placeholder data
+fn create_module_config_packet(packet_id: u32) -> FromRadio<'static> {
+    use meshtastic_protobufs::meshtastic::{ModuleConfig, module_config};
+    
+    let mqtt_config = module_config::MqttConfig {
+        enabled: false,
+        address: "",
+        username: "",
+        password: "",
+        encryption_enabled: false,
+        json_enabled: false,
+        tls_enabled: false,
+        root: "",
+        proxy_to_client_enabled: false,
+        map_reporting_enabled: false,
+        map_report_settings: None,
+        unknown_fields: Default::default(),
+    };
+
+    let module_config = ModuleConfig {
+        payload_variant: Some(module_config::PayloadVariant::Mqtt(mqtt_config)),
+        unknown_fields: Default::default(),
+    };
+
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::ModuleConfig(module_config),
+        ),
+        unknown_fields: Default::default(),
+    }
+}
+
+/// Create a FromRadio packet containing Channel with minimal placeholder data
+fn create_channel_packet(packet_id: u32) -> FromRadio<'static> {
+    use meshtastic_protobufs::meshtastic::{Channel, ChannelSettings, channel};
+    
+    let channel_settings = ChannelSettings {
+        channel_num: 0, // Deprecated but required
+        psk: &[0x01], // Default AES key
+        name: "LongFast",
+        id: 0,
+        uplink_enabled: false,
+        downlink_enabled: false,
+        module_settings: None,
+        unknown_fields: Default::default(),
+    };
+
+    let channel = Channel {
+        index: 0,
+        settings: Some(channel_settings),
+        role: femtopb::EnumValue::Known(channel::Role::Primary),
+        unknown_fields: Default::default(),
+    };
+
+    FromRadio {
+        id: packet_id,
+        payload_variant: Some(
+            meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::Channel(channel),
+        ),
+        unknown_fields: Default::default(),
+    }
+}
+
+// fn create_channels_packet(packet_id: u32) -> FromRadio<'static> {
+//     FromRadio {
+//         id: packet_id,
+//         payload_variant: Some(
+//             meshtastic_protobufs::meshtastic::from_radio::PayloadVariant::Channels(
+//                 meshtastic_protobufs::meshtastic::Channels {
+//                     channels: vec![],
+//                     unknown_fields: Default::default(),
+//                 },
+//             ),
+//         ),
+//         unknown_fields: Default::default(),
+//     }
+// }
 /// Encode a FromRadio packet to bytes for transmission over serial/BLE/etc
 fn encode_from_radio_packet(packet: &FromRadio, buffer: &mut [u8]) -> Option<usize> {
     let buffer_len = buffer.len();
