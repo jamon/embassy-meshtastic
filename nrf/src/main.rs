@@ -33,6 +33,9 @@ use meshtassy_net::key::ChannelKey;
 use meshtassy_net::{Decoded, Decrypted, Encrypted, Header, Packet};
 use meshtastic_protobufs::meshtastic::{Data, PortNum};
 
+mod environmental_telemetry;
+use environmental_telemetry::EnvironmentalData;
+
 static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Packet<Decoded>, 8, 8, 1> =
     PubSubChannel::<CriticalSectionRawMutex, Packet<Decoded>, 8, 8, 1>::new();
 
@@ -157,6 +160,7 @@ async fn main(spawner: Spawner) {
     );
 
     // Try initializing a BME
+    //todo: throw this in an embassy task that eventually scans a given i2c bus
     info!("Try initializing a BME on the I2C bus");
     let bme_config = bosch_bme680::Configuration::default();
     let mut bme = bosch_bme680::AsyncBme680::new(
@@ -165,43 +169,8 @@ async fn main(spawner: Spawner) {
         Delay,
         24, // wrong initial temperature, is it in C?
     );
-    match bme.initialize(&bme_config).await {
-        Ok(_) => {
-            info!("Configured BME! Trying to read...");
-            Delay.delay_ms(12000).await; // 12 second delay after configuration
-            match bme.measure().await {
-                Ok(values) => {
-                    info!("Humidity: {:?}%", values.humidity);
-                    info!("Temperature: {:?}", values.temperature);
-                    info!("Pressure: {:?}", values.pressure);
-                    match values.gas_resistance {
-                        Some(gr) => info!("Gas Resistance: {:?}", gr),
-                        None => (),
-                    }
-                }
-                Err(x) => info!(
-                    "Could not read BME measurements: {:?}",
-                    match x {
-                        bosch_bme680::BmeError::WriteError(_) => "Write Error",
-                        bosch_bme680::BmeError::WriteReadError(_) => "Write Read Error",
-                        bosch_bme680::BmeError::UnexpectedChipId(_) => "Unexpected Chip ID",
-                        bosch_bme680::BmeError::MeasuringTimeOut => "Measuring Time Out",
-                        bosch_bme680::BmeError::Uninitialized => "Uninitialized",
-                    }
-                ),
-            }
-        }
-        Err(x) => info!(
-            "Could not configure BME: {:?}",
-            match x {
-                bosch_bme680::BmeError::WriteError(_) => "Write Error",
-                bosch_bme680::BmeError::WriteReadError(_) => "Write Read Error",
-                bosch_bme680::BmeError::UnexpectedChipId(_) => "Unexpected Chip ID",
-                bosch_bme680::BmeError::MeasuringTimeOut => "Measuring Time Out",
-                bosch_bme680::BmeError::Uninitialized => "Uninitialized",
-            }
-        ),
-    }
+    bme.setup().await;
+    let metrics = bme.get_metrics().await;
 
     // are we configured to use DIO2 as RF switch?  (This should be true for Sx1262)
     info!("Use dio2 as RFSwitch? {:?}", Sx1262.use_dio2_as_rfswitch());
