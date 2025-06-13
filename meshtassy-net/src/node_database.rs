@@ -227,23 +227,19 @@ impl NodeDatabase {
                     return;
                 }
             }
-        }
-
-        // Add new node if there's space
+        }        // Add new node if there's space
         for slot in &mut self.nodes {
             if slot.is_none() {
                 #[cfg(feature = "defmt")]
-                defmt::info!("Adding new node {}: {:?}", node_info.num, node_info);
+                defmt::info!("Adding new node 0x{:08X}: {:?}", node_info.num, node_info);
 
                 *slot = Some(node_info);
                 self.node_count += 1;
                 return;
             }
-        }
-
-        // If we reach here, the database is full
+        }        // If we reach here, the database is full
         #[cfg(feature = "defmt")]
-        defmt::info!("Database is full, cannot add node {}", node_info.num);
+        defmt::info!("Database is full, cannot add node 0x{:08X}", node_info.num);
         // Could implement LRU eviction here if needed
     }
     /// Update telemetry data for a specific node
@@ -259,10 +255,9 @@ impl NodeDatabase {
                     // defmt::info!("  After: metrics = {:?}", existing.device_metrics);
                     return;
                 }
-            }
-        }
+            }        }
         #[cfg(feature = "defmt")]
-        defmt::info!("Node {} not found for telemetry update", node_num);
+        defmt::info!("Node 0x{:08X} not found for telemetry update", node_num);
     }
     /// Update SNR and last heard timestamp for a node
     pub fn update_node_signal(&mut self, node_num: u32, snr: f32, last_heard: u32) {
@@ -286,10 +281,9 @@ impl NodeDatabase {
                     // );
                     return;
                 }
-            }
-        }
+            }        }
         #[cfg(feature = "defmt")]
-        defmt::info!("Node {} not found for signal update", node_num);
+        defmt::info!("Node 0x{:08X} not found for signal update", node_num);
     }
 
     /// Get a node by its number
@@ -355,10 +349,8 @@ impl NodeDatabase {
 
                     // Update SNR and add to database
                     node_info.snr = packet.snr as f32;
-                    self.add_or_update_node(node_info);
-
-                    #[cfg(feature = "defmt")]
-                    defmt::info!("Node {} user info updated", node_num);
+                    self.add_or_update_node(node_info);                    #[cfg(feature = "defmt")]
+                    defmt::info!("Node 0x{:08X} user info updated", node_num);
                     true
                 } else {
                     false
@@ -380,10 +372,8 @@ impl NodeDatabase {
 
                     // Update SNR and add to database
                     node_info.snr = packet.snr as f32;
-                    self.add_or_update_node(node_info);
-
-                    #[cfg(feature = "defmt")]
-                    defmt::info!("Node {} position updated", node_num);
+                    self.add_or_update_node(node_info);                    #[cfg(feature = "defmt")]
+                    defmt::info!("Node 0x{:08X} position updated", node_num);
                     true
                 } else {
                     false
@@ -404,10 +394,8 @@ impl NodeDatabase {
 
                         node_info.device_metrics = Some(device_metrics);
                         node_info.snr = packet.snr as f32;
-                        self.add_or_update_node(node_info);
-
-                        #[cfg(feature = "defmt")]
-                        defmt::info!("Node {} telemetry updated", node_num);
+                        self.add_or_update_node(node_info);                        #[cfg(feature = "defmt")]
+                        defmt::info!("Node 0x{:08X} telemetry updated", node_num);
                         true
                     } else {
                         // For other telemetry types, just update basic info
@@ -418,10 +406,8 @@ impl NodeDatabase {
                         });
 
                         node_info.snr = packet.snr as f32;
-                        self.add_or_update_node(node_info);
-
-                        #[cfg(feature = "defmt")]
-                        defmt::info!("Node {} basic info updated from telemetry", node_num);
+                        self.add_or_update_node(node_info);                        #[cfg(feature = "defmt")]
+                        defmt::info!("Node 0x{:08X} basic info updated from telemetry", node_num);
                         true
                     }
                 } else {
@@ -437,10 +423,8 @@ impl NodeDatabase {
                 });
 
                 node_info.snr = packet.snr as f32;
-                self.add_or_update_node(node_info);
-
-                #[cfg(feature = "defmt")]
-                defmt::info!("Node {} basic info updated (SNR: {})", node_num, packet.snr);
+                self.add_or_update_node(node_info);                #[cfg(feature = "defmt")]
+                defmt::info!("Node 0x{:08X} basic info updated (SNR: {})", node_num, packet.snr);
                 true
             }
         }

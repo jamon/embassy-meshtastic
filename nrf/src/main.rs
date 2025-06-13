@@ -6,14 +6,12 @@ use core::u32;
 use crate::usb_framer::Framer;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
-use embassy_nrf::{bind_interrupts, pac, peripherals, rng, spim, usb};
+use embassy_nrf::peripherals;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
 use embassy_time::Delay;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
-use embedded_hal_bus::spi::ExclusiveDevice;
 use femtopb::Message as _;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{Sx1262, Sx126x, Sx126xVariant, TcxoCtrlVoltage};
@@ -35,6 +33,8 @@ use meshtassy_net::key::ChannelKey;
 use meshtassy_net::{DecodedPacket, Decrypted, Encrypted, Header, Packet};
 use meshtastic_protobufs::meshtastic::{Data, FromRadio, MyNodeInfo, PortNum, ToRadio, NodeInfo, User};
 mod usb_framer;
+
+mod boards;
 
 static PACKET_CHANNEL: PubSubChannel<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1> =
     PubSubChannel::<CriticalSectionRawMutex, DecodedPacket, 8, 8, 1>::new();
@@ -66,13 +66,6 @@ const LORA_SF: SpreadingFactor = SpreadingFactor::_11;
 const LORA_BANDWIDTH: Bandwidth = Bandwidth::_250KHz;
 const LORA_CODINGRATE: CodingRate = CodingRate::_4_5;
 
-bind_interrupts!(struct Irqs {
-    TWISPI0 => spim::InterruptHandler<peripherals::TWISPI0>;
-    RNG => rng::InterruptHandler<peripherals::RNG>;
-    USBD => usb::InterruptHandler<peripherals::USBD>;
-    CLOCK_POWER => usb::vbus_detect::InterruptHandler;
-});
-
 // This example task processes incoming packets from the Meshtastic radio.
 // It subscribes to the PACKET_CHANNEL and handles each packet as it arrives.
 #[embassy_executor::task]
@@ -101,12 +94,9 @@ async fn packet_processor_task() {
 async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(Default::default());
 
-    // USB
-    info!("Enabling ext hfosc...");
-    pac::CLOCK.tasks_hfclkstart().write_value(1);
-    while pac::CLOCK.events_hfclkstarted().read() != 1 {}
-    info!("Ext hfosc enabled");
-    let driver = Driver::new(p.USBD, Irqs, HardwareVbusDetect::new(Irqs));
+    // Initialize board-specific peripherals
+    let board = boards::init_board(p);    // USB
+    let driver = board.usb_driver;
 
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Embassy");
@@ -134,18 +124,11 @@ async fn main(spawner: Spawner) {
     let cdc = CdcAcmClass::new(&mut builder, state, 64);
     let usb = builder.build();
 
-    let nss = Output::new(p.P0_04, Level::High, OutputDrive::Standard);
-    let reset = Output::new(p.P0_28, Level::High, OutputDrive::Standard);
-    let dio1 = Input::new(p.P0_03, Pull::Down);
-    let busy = Input::new(p.P0_29, Pull::None);
-
-    let mut spi_config = spim::Config::default();
-    spi_config.frequency = spim::Frequency::M16;
-    let spi_sck = p.P1_13;
-    let spi_miso = p.P1_14;
-    let spi_mosi = p.P1_15;
-    let spim = spim::Spim::new(p.TWISPI0, Irqs, spi_sck, spi_miso, spi_mosi, spi_config);
-    let spi = ExclusiveDevice::new(spim, nss, Delay);
+    // LoRa radio setup using board peripherals
+    let spi = board.lora.spi;
+    let reset = board.lora.reset;
+    let dio1 = board.lora.dio1;
+    let busy = board.lora.busy;
 
     // are we configured to use DIO2 as RF switch?  (This should be true for Sx1262)
     info!("Use dio2 as RFSwitch? {:?}", Sx1262.use_dio2_as_rfswitch());
@@ -155,21 +138,25 @@ async fn main(spawner: Spawner) {
         tcxo_ctrl: Some(TcxoCtrlVoltage::Ctrl1V7),
         use_dcdc: true,
         rx_boost: true,
-    };
-
+    };    
     let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, None).unwrap();
-    let radio = Sx126x::new(spi, iv, config);
-
+    let radio = Sx126x::new(spi, iv, config);    
     let mut lora = LoRa::with_syncword(radio, LORA_SYNCWORD, Delay)
         .await
         .unwrap();
 
-    let mut led_red = Output::new(p.P0_26, Level::Low, OutputDrive::Standard);
-    let mut led_green = Output::new(p.P0_30, Level::Low, OutputDrive::Standard);
-    let mut led_blue = Output::new(p.P0_06, Level::Low, OutputDrive::Standard);
-    led_green.set_high();
-    led_blue.set_high();
-    led_red.set_high(); // Spawn the packet processor task
+    // Setup LEDs using board peripherals (if available)
+    if let Some(leds) = board.leds {
+        let mut led_red = leds.red;
+        let mut led_green = leds.green;
+        let mut led_blue = leds.blue;
+        led_green.set_low();  // Turn on green LED (active low)
+        led_blue.set_low();   // Turn on blue LED (active low)
+        led_red.set_low();    // Turn on red LED (active low)
+        info!("LEDs initialized");
+    } else {
+        info!("No LEDs available on this board");
+    }// Spawn the packet processor task
     spawner.spawn(packet_processor_task()).unwrap();
 
     // Spawn the USB serial task
@@ -225,9 +212,8 @@ async fn main(spawner: Spawner) {
                 info!("Radio error = {}", err);
                 return;
             }
-        }
-    };
-    let mut rng = embassy_nrf::rng::Rng::new(p.RNG, Irqs);
+        }    };
+    let mut rng = board.rng;
     let mut bytes = [0u8; 4];
     rng.blocking_fill_bytes(&mut bytes);
     let tx_packet_id = u32::from_le_bytes(bytes); // Create the transmission header

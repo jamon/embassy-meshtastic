@@ -54,6 +54,12 @@ heapless = { version = "0.8", default-features = false }
 meshtastic-protobufs = { path = "../meshtastic-protobufs", version = "0.1.0", features = ["defmt"] }
 meshtassy-net = { path = "../meshtassy-net", version = "0.1.0", default-features = false, features = ["defmt"] }
 
+[features]
+default = ["board-seeed-xiao-nrf52840"]
+
+# Board-specific features
+board-seeed-xiao-nrf52840 = []
+
 [patch.crates-io]
 embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "4766cc6f9756b54bb2e25be5ba5276538ea4917b" }
 
